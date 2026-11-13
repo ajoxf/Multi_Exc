@@ -36,6 +36,8 @@ nothing computes a hedge from it any more.
 
 import math
 
+from .contracts import money_text
+
 
 #: Where a quantity stops being a number and starts being noise.
 #: Clicks are typed in hundredths at the smallest, so nine decimal
@@ -164,6 +166,8 @@ def clip_plan(pair, meta_a, meta_b, price_a, price_b, spreads=1.0):
     resting EITHER).
     """
     beta = float(pair.hedge_ratio or 1.0)
+    # Leg B's money: k = L_B x C_B is in leg B's units.
+    currency = meta_b.get('currency')
     contract_a = float(meta_a.get('contract_size') or 0.0)
     contract_b = float(meta_b.get('contract_size') or 0.0)
     step_a = meta_a.get('volume_step') or 0.0
@@ -208,7 +212,8 @@ def clip_plan(pair, meta_a, meta_b, price_a, price_b, spreads=1.0):
     elif lots_b <= 0:
         reason = (f"Qty {spreads:g} x {unit_b:g} is {unit_b * spreads:g} lots "
                   f"on leg B, under its {min_b:g}-lot minimum"
-                  + (f' — this pair needs at least ${floor:,.0f} a leg'
+                  + (f' — this pair needs at least '
+                     f'{money_text(floor, currency, 0)} a leg'
                      if floor else ''))
     elif max_a and lots_a > max_a + 1e-9:
         room = fits(max_a, unit_a)
@@ -245,5 +250,6 @@ def clip_plan(pair, meta_a, meta_b, price_a, price_b, spreads=1.0):
         'unit_lots_a': unit_a, 'unit_lots_b': unit_b,
         # The sentence the ladder prints beside the quantity box.
         'derivation': (f"Qty {spreads:g} = {lots_a:g} lots A / {lots_b:g} "
-                       f"lots B, ${k:,.2f} per 1.00 of spread"),
+                       f"lots B, {money_text(k, currency)} per 1.00 of "
+                       f"spread"),
     }

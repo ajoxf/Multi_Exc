@@ -32,8 +32,7 @@ import subprocess
 import sys
 import time
 
-from mt5trader.config import TraderConfig, endpoint_clash, login_clash, \
-    terminal_clash
+from mt5trader.config import TraderConfig, engine_hold_reasons
 from mt5trader.ipc import parse_endpoint
 
 #: How long a child gets to finish its own shutdown before it is killed.
@@ -92,7 +91,8 @@ def engine_fingerprint(config_path):
     accounts = {
         name: {key: (account or {}).get(key)
                for key in ('endpoint', 'login', 'server', 'terminal_path',
-                           'password_env')}
+                           'password_env', 'kind', 'app_id', 'user_id',
+                           'exchange', 'product', 'quantity_in_lots')}
         for name, account in (raw.get('accounts') or {}).items()}
     pairs = {
         key: {field: (pair or {}).get(field)
@@ -127,14 +127,13 @@ def check_config(path):
         TraderConfig.from_raw(raw, path)
     except Exception as e:
         return [f'{path} could not be loaded: {type(e).__name__}: {e}']
+    # The clashes, and a MetaTrader 5 that is not where an account
+    # says: the same list the web screen reads to say why the engine
+    # is waiting (`config.engine_hold_reasons`).
+    problems.extend(engine_hold_reasons(raw))
     for name, account in (raw.get('accounts') or {}).items():
         account = account or {}
         endpoint = (account.get('endpoint') or '').strip()
-        for clash in (endpoint_clash(raw, name, endpoint),
-                      login_clash(raw, name, account.get('login')),
-                      terminal_clash(raw, name, account.get('terminal_path'))):
-            if clash:
-                problems.append(f"account '{name}': {clash}")
         if endpoint:
             try:
                 parse_endpoint(endpoint)

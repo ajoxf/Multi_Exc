@@ -190,3 +190,14 @@ def test_the_example_config_does_not_drift_from_the_defaults():
         f'config.example.json disagrees with DEFAULT_SETTINGS: {drifted}. '
         f'Either update the example or drop the key from it — a copied '
         f'example pins the stale value into every new deployment.')
+
+
+def test_a_config_still_carrying_AutoRouting_loads_and_ignores_it():
+    """AutoRouting has been removed. A desk's config.json written before
+    that still says `auto_route: true` on its pairs and
+    `AUTO_ROUTE_ENABLED: true` in its settings — and must still load,
+    with nothing armed by either."""
+    from mt5trader.config import PairConfig
+    pair = PairConfig.from_dict('A|B', {'name': 'A vs B', 'auto_route': True})
+    assert not hasattr(pair, 'auto_route')
+    assert 'auto_route' not in pair.to_dict()

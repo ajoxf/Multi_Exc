@@ -237,6 +237,35 @@ DEFAULT_SETTINGS = {
     #: Ladder row height in pixels. 17 is the reference screen's; a
     #: bigger target is a faster, safer click on a large monitor.
     'ROW_HEIGHT_PX': 17,
+    #: What backs a WORKING ORDER (a LIMIT click, or a MARKET click
+    #: away from the touch) until it fills.
+    #:
+    #: TRIGGER (the default): NOTHING at the broker. The level is held
+    #: here and, when the EXECUTABLE spread reaches it - the Sell
+    #: spread at or over a SELL, the Buy spread at or under a BUY -
+    #: both legs cross at MARKET together, through the same path a
+    #: market click takes. It fills when the SPREAD gets there.
+    #:
+    #: QUOTE: the old way - a real limit on one leg, the other crossed
+    #: when it fills. It earns one leg's bid-ask, but on two legs that
+    #: move together (spot gold against the gold future) the limit
+    #: fills on a move in GOLD, not in the spread, and the leg crossed
+    #: afterwards has moved the same way: live, a SELL at 28.30 went
+    #: on at 26.84, every fill the same direction. Kept for a pair
+    #: whose legs really are independent; not on the screen.
+    'WORKING_ORDERS': 'TRIGGER',
+    #: Before a held working order is sent, read BOTH legs' prices
+    #: again, fresh, and send only if the spread is STILL at the level.
+    #: The poll that saw the level can be up to a poll old; a spread
+    #: that only flickered there has gone back by the time the orders
+    #: land, and that fill is the bad one. Costs one tick read per leg,
+    #: only at the moment of sending. Off sends on the poll's prices.
+    'RECHECK_BEFORE_SEND': True,
+    #: The same for the Algo's TAKE-PROFIT, and only that exit: both
+    #: legs read again, and the close goes only if the fresh closing
+    #: price still reaches the target. A stop, the cutoff, a kill and
+    #: every manual close are never re-checked - nothing waits there.
+    'RECHECK_TAKE_PROFIT': True,
     #: Re-peg dead band, in ladder increments. Every MODIFY loses queue
     #: position, so re-pricing three times a second guarantees you are
     #: never at the front of a queue — which defeats quoting entirely
@@ -312,12 +341,6 @@ DEFAULT_SETTINGS = {
     #: on the screen and one wrong sign in a swap field is all it takes
     #: to display a licence to print money.
     'CARRY_RATE_PCT': None,
-    #: The master switch for AutoRouting. OFF, no ladder arms a target
-    #: however its own box is ticked — the one place a desk can stand
-    #: every automatic order down before a session without going round
-    #: the ladders one at a time. It is deliberately not per pair: a
-    #: switch you have to find twice is a switch that gets missed once.
-    'AUTO_ROUTE_ENABLED': False,
 
     # --- housekeeping -------------------------------------------------
     'RECONCILE_INTERVAL_SEC': 20.0,
@@ -334,38 +357,120 @@ STRUCTURAL_SETTINGS = ('POLL_INTERVAL_SEC',)
 
 
 class AccountConfig:
-    """One MT5 account = one login, one terminal, one port.
+    """One account = one login, one leg runner, one port.
 
-    Two accounts pointing at the same terminal folder are ONE account
-    whatever the config says — a terminal holds a single login.
+    `kind` says which broker the runner talks to:
+
+      mt5    a MetaTrader 5 terminal (the CME / COMEX / NYMEX leg, or a
+             CFD) — login, server, terminal path, password in .env
+      arrow  an Arrow login on an Indian exchange (the MCX leg) — app
+             id and user id here; the password, API secret and TOTP
+             SEED live in .env under the names held here, never in
+             this file
+
+    Two MT5 accounts pointing at the same terminal folder are ONE
+    account whatever the config says — a terminal holds a single login.
     """
 
     def __init__(self, name, terminal_path=None, login=None,
-                 password_env="", server=None, endpoint=None):
+                 password_env="", server=None, endpoint=None, kind='mt5',
+                 app_id=None, user_id=None, api_secret_env="",
+                 totp_secret_env="", exchange=None, product=None,
+                 quantity_in_lots=False, max_lots=None, price_divisor=None,
+                 candle_price_divisor=None):
         self.name = name
+        self.kind = (str(kind or 'mt5').strip().lower())
+        if self.kind not in ACCOUNT_KINDS:
+            _warn_once("account '%s': unknown kind %r — treating it as mt5",
+                       name, kind)
+            self.kind = 'mt5'
         self.terminal_path = terminal_path
-        self.login = int(login) if login else None
-        self.password_env = password_env or env_key_for(name)
+        try:
+            self.login = int(login) if login else None
+        except (TypeError, ValueError):
+            self.login = None
+        self.password_env = password_env or (
+            arrow_env_key(name, 'PASSWORD') if self.kind == 'arrow'
+            else env_key_for(name))
         self.server = server
         #: host:port where this account's leg runner listens.
         self.endpoint = endpoint
+        # --- Arrow ---
+        self.app_id = app_id
+        self.user_id = user_id
+        self.api_secret_env = api_secret_env or (
+            arrow_env_key(name, 'API_SECRET') if self.kind == 'arrow' else '')
+        self.totp_secret_env = totp_secret_env or (
+            arrow_env_key(name, 'TOTP_SECRET') if self.kind == 'arrow' else '')
+        self.exchange = (exchange or ('MCX' if self.kind == 'arrow' else None))
+        self.product = product or ('NRML' if self.kind == 'arrow' else None)
+        #: Some Indian brokers take an MCX `quantity` in LOTS rather than
+        #: units. Arrow takes units (lots x lot size); flip this only if a
+        #: one-lot test order proves otherwise.
+        self.quantity_in_lots = bool(quantity_in_lots)
+        self.max_lots = _blank_to_none(max_lots)
+        self.price_divisor = _blank_to_none(price_divisor)
+        #: Arrow's candle history is in PAISE (100). Checked against the
+        #: live book either way; set 1 only if a build answers in rupees.
+        self.candle_price_divisor = _blank_to_none(candle_price_divisor)
 
     @property
     def password(self):
         return os.environ.get(self.password_env) if self.password_env else None
 
+    @property
+    def api_secret(self):
+        return (os.environ.get(self.api_secret_env)
+                if self.api_secret_env else None)
+
+    @property
+    def totp_secret(self):
+        return (os.environ.get(self.totp_secret_env)
+                if self.totp_secret_env else None)
+
+    @property
+    def is_arrow(self):
+        return self.kind == 'arrow'
+
     def to_dict(self):
-        return {'terminal_path': self.terminal_path, 'login': self.login,
-                'password_env': self.password_env, 'server': self.server,
-                'endpoint': self.endpoint}
+        out = {'kind': self.kind, 'terminal_path': self.terminal_path,
+               'login': self.login, 'password_env': self.password_env,
+               'server': self.server, 'endpoint': self.endpoint}
+        if self.kind == 'arrow':
+            out.update({'app_id': self.app_id, 'user_id': self.user_id,
+                        'api_secret_env': self.api_secret_env,
+                        'totp_secret_env': self.totp_secret_env,
+                        'exchange': self.exchange, 'product': self.product,
+                        'quantity_in_lots': self.quantity_in_lots,
+                        'max_lots': self.max_lots,
+                        'price_divisor': self.price_divisor,
+                        'candle_price_divisor': self.candle_price_divisor})
+        return out
 
     @classmethod
     def from_dict(cls, name, raw):
         raw = raw or {}
-        return cls(name, terminal_path=raw.get('terminal_path'),
+        # Cleaned on the way in: a path saved with the quotes Windows'
+        # "Copy as path" adds is still a path, and every part of the
+        # engine reads it from here.
+        return cls(name, terminal_path=(
+                       clean_terminal_path(raw.get('terminal_path')) or None),
                    login=raw.get('login'),
                    password_env=raw.get('password_env'),
-                   server=raw.get('server'), endpoint=raw.get('endpoint'))
+                   server=raw.get('server'), endpoint=raw.get('endpoint'),
+                   kind=raw.get('kind') or 'mt5',
+                   app_id=raw.get('app_id'), user_id=raw.get('user_id'),
+                   api_secret_env=raw.get('api_secret_env'),
+                   totp_secret_env=raw.get('totp_secret_env'),
+                   exchange=raw.get('exchange'), product=raw.get('product'),
+                   quantity_in_lots=raw.get('quantity_in_lots'),
+                   max_lots=raw.get('max_lots'),
+                   price_divisor=raw.get('price_divisor'),
+                   candle_price_divisor=raw.get('candle_price_divisor'))
+
+
+#: The brokers a leg runner can talk to.
+ACCOUNT_KINDS = ('mt5', 'arrow')
 
 
 class PairConfig:
@@ -391,11 +496,16 @@ class PairConfig:
                  expiry=None, expiry_a=None,
                  swap_a_long_per_lot=None, swap_a_short_per_lot=None,
                  swap_b_long_per_lot=None, swap_b_short_per_lot=None,
-                 auto_route=False, commission_per_lot_a=None,
+                 commission_per_lot_a=None,
                  commission_per_lot_b=None, slippage_allowance=None,
                  break_even_nights=None, tp_target_pct_of_margin=None,
                  carry_rate_pct=None,
-                 show_fair_window=False, algo=None, algo_window=None):
+                 show_fair_window=False, algo=None, algo_window=None,
+                 algo_params=None, session_open=None, session_close=None,
+                 break_start=None, break_end=None,
+                 arb_alert=False, arb_normal=None, arb_normal_pct=None,
+                 arb_margin=None, arb_extra_cost=None, arb_z=None,
+                 fx_hedge_cost_per_lot=None, fx_hedge_lot_usd=None):
         self.key = key
         self.name = name or key
         self.leg_a = dict(leg_a or {})      # {'account': ..., 'symbol': ...}
@@ -495,10 +605,6 @@ class PairConfig:
         self.swap_a_short_per_lot = _blank_to_none(swap_a_short_per_lot)
         self.swap_b_long_per_lot = _blank_to_none(swap_b_long_per_lot)
         self.swap_b_short_per_lot = _blank_to_none(swap_b_short_per_lot)
-        #: AutoRouting: on a fill, rest a working order to CLOSE at the
-        #: take-profit level, priced from the actual executed spread.
-        #: Default OFF (spec section 5.4).
-        self.auto_route = bool(auto_route)
         #: What a trade on THIS ladder costs, and where it therefore
         #: gets out. Per ladder, not per system: a gold basis and a
         #: WTI/Brent differential are charged different commissions,
@@ -521,29 +627,71 @@ class PairConfig:
         #: reason — see the `algo` property.
         self.algo_window = bool(show_fair_window if algo_window is None
                                 else algo_window)
+        #: The arbitrage ALERT (arbalert.py) — never an order. Off by
+        #: default. `arb_normal` + `arb_normal_pct` of leg B is what
+        #: this pair's gap normally is (crude ~0; MCX gold carries duty);
+        #: `arb_margin` the net edge, after costs, that must be cleared;
+        #: `arb_extra_cost` per-unit costs not in the commission (CTT,
+        #: fees); `arb_z` the sigmas from recent history (0 = off).
+        self.arb_alert = bool(arb_alert)
+        self.arb_normal = _blank_to_none(arb_normal)
+        self.arb_normal_pct = _blank_to_none(arb_normal_pct)
+        self.arb_margin = _blank_to_none(arb_margin)
+        self.arb_extra_cost = _blank_to_none(arb_extra_cost)
+        self.arb_z = _blank_to_none(arb_z)
+        #: The USDINR hedge the dollar leg needs: what one NSE USDINR
+        #: lot costs ROUND TRIP, all-in, in the pair's money (typed by
+        #: the trader), and how many dollars a lot is (blank = 1,000).
+        #: The number of lots is worked out from leg A's live notional.
+        self.fx_hedge_cost_per_lot = _blank_to_none(fx_hedge_cost_per_lot)
+        self.fx_hedge_lot_usd = _blank_to_none(fx_hedge_lot_usd)
+        #: The Algo's own numbers for THIS ladder — entry z, candle
+        #: timeframe and length, the gates and the optional exits. Only
+        #: what was typed is kept; a blank is the default, read through
+        #: `algo.clean_params`. Whether the Algo is ON is not here: that
+        #: is held by the running engine and is off after every restart.
+        self.algo_params = _clean_algo_params(algo_params)
+        #: THIS ladder's trading hours, 'HH:MM' on the BROKER's clock
+        #: (see `session.PairSession`). Blank close is the desk-wide
+        #: OVERNIGHT_CLOSE; blank open is "any time before the close";
+        #: the break takes both ends or neither. An oil future and a
+        #: gold CFD do not keep the same day.
+        from .session import clean_hhmm
+        self.session_open = clean_hhmm(session_open)
+        self.session_close = clean_hhmm(session_close)
+        self.break_start = clean_hhmm(break_start)
+        self.break_end = clean_hhmm(break_end)
         #: Cached MT5 metadata per leg, refreshed by the coordinator.
         self.meta_a = {}
         self.meta_b = {}
 
     @property
     def algo(self):
-        """Which algo this ladder runs. DERIVED, not chosen.
+        """Which READING this ladder's window shows from config: Fair
+        spread when the window is ticked, NONE when it is not.
 
-        There was a dropdown here while a second algo was being built.
-        That algo was taken back out, which left one choice presented
-        as two controls — pick Fair spread, then tick Show window —
-        either of which alone did nothing anybody could see. So the
-        tick is the whole decision now: the window is open and the
-        reading is computed, or neither.
-
-        Still NONE when the window is shut, and for the same reason it
-        always was: a ladder nobody is reading costs nothing on the
-        wire either. And still only a reading — it does not place,
-        modify or cancel an order, and a click on the ladder behaves
-        identically whichever way this reads.
+        The Algo itself is not decided here. It is switched on in the
+        RUNNING engine, per ladder, and is off after every restart, so
+        no config file can bring a signal back that nobody turned on
+        today. The snapshot says ALGO for a ladder whose Algo is on.
         """
         from .algo import FAIR_SPREAD, NONE
         return FAIR_SPREAD if self.algo_window else NONE
+
+    @algo.setter
+    def algo(self, value):
+        """NONE shuts the window, FAIR_SPREAD opens it. ALGO is the
+        engine's switch, not a config value, and changes nothing here.
+
+        This used to have no setter at all, so sending `algo` through
+        the settings path raised AttributeError mid-save.
+        """
+        from .algo import FAIR_SPREAD, NONE
+        chosen = str(value or NONE).upper()
+        if chosen == NONE:
+            self.algo_window = False
+        elif chosen == FAIR_SPREAD:
+            self.algo_window = True
 
     @property
     def symbol_a(self):
@@ -647,7 +795,7 @@ class PairConfig:
     #: Blocking these behind a restart is what put "an assets change
     #: requires a restart" ten lines above a live trade while the values
     #: sat saved and correct.
-    HOT_FIELDS = (('expiry', 'expiry_a', 'auto_route',
+    HOT_FIELDS = (('expiry', 'expiry_a',
                    'swap_a_long_per_lot', 'swap_a_short_per_lot',
                    'swap_b_long_per_lot', 'swap_b_short_per_lot',
                    'order_type', 'exit_type',
@@ -658,7 +806,13 @@ class PairConfig:
                    'clip_lots_a', 'clip_lots_b',
                    'contract_size_a', 'contract_size_b',
                    'max_quote_age_sec',
-                   'algo_window', 'show_fair_window', 'pair_type')
+                   'algo_window', 'show_fair_window', 'pair_type',
+                   'algo_params',
+                   'session_open', 'session_close',
+                   'break_start', 'break_end',
+                   'arb_alert', 'arb_normal', 'arb_normal_pct',
+                   'arb_margin', 'arb_extra_cost', 'arb_z',
+                   'fx_hedge_cost_per_lot', 'fx_hedge_lot_usd')
                   + tuple(EXIT_FIELDS))
 
     def apply_hot(self, raw):
@@ -675,11 +829,26 @@ class PairConfig:
             if field in self.EXIT_FIELDS or (
                     field.startswith('swap_') and field.endswith('_per_lot')):
                 value = _blank_to_none(value)
-            elif field in ('auto_route', 'algo_window', 'show_fair_window'):
+            elif field == 'arb_alert':
+                value = bool(value)
+            elif field.startswith('arb_') or field.startswith('fx_hedge_'):
+                value = _blank_to_none(value)
+                if value is not None:
+                    try:
+                        value = float(value)
+                    except (TypeError, ValueError):
+                        continue
+            elif field in ('algo_window', 'show_fair_window'):
                 field = 'algo_window' if field == 'show_fair_window' else field
                 value = bool(value)
             elif field == 'pair_type':
                 value = pair_type_name(value)
+            elif field == 'algo_params':
+                value = _clean_algo_params(value)
+            elif field in ('session_open', 'session_close', 'break_start',
+                           'break_end'):
+                from .session import clean_hhmm
+                value = clean_hhmm(value)
             elif field == 'order_type':
                 value = _choice(OrderType, value, self.order_type.value,
                                 self.key, field)
@@ -738,7 +907,6 @@ class PairConfig:
             'swap_a_short_per_lot': self.swap_a_short_per_lot,
             'swap_b_long_per_lot': self.swap_b_long_per_lot,
             'swap_b_short_per_lot': self.swap_b_short_per_lot,
-            'auto_route': self.auto_route,
             'commission_per_lot_a': self.commission_per_lot_a,
             'commission_per_lot_b': self.commission_per_lot_b,
             'slippage_allowance': self.slippage_allowance,
@@ -746,6 +914,16 @@ class PairConfig:
             'tp_target_pct_of_margin': self.tp_target_pct_of_margin,
             'carry_rate_pct': self.carry_rate_pct,
             'algo': self.algo, 'algo_window': self.algo_window,
+            'arb_alert': self.arb_alert, 'arb_normal': self.arb_normal,
+            'arb_normal_pct': self.arb_normal_pct,
+            'arb_margin': self.arb_margin,
+            'arb_extra_cost': self.arb_extra_cost, 'arb_z': self.arb_z,
+            'fx_hedge_cost_per_lot': self.fx_hedge_cost_per_lot,
+            'fx_hedge_lot_usd': self.fx_hedge_lot_usd,
+            'algo_params': dict(self.algo_params),
+            'session_open': self.session_open,
+            'session_close': self.session_close,
+            'break_start': self.break_start, 'break_end': self.break_end,
         }
 
     @classmethod
@@ -782,10 +960,22 @@ class PairConfig:
         return cls(key, **raw)
 
 
+def _clean_algo_params(raw):
+    """The typed Algo settings only, by name; blanks dropped."""
+    from .algo import DEFAULT_PARAMS
+    return {key: value for key, value in dict(raw or {}).items()
+            if key in DEFAULT_PARAMS and value not in (None, '')}
+
+
 class TraderConfig:
     """Everything the engine reads, and where it came from."""
 
-    def __init__(self, accounts=None, pairs=None, settings=None, path=None):
+    def __init__(self, accounts=None, pairs=None, settings=None, path=None,
+                 fx=None):
+        #: The exchange rates cross-currency pairs convert through —
+        #: see fx.py. Hot: a new USDINR changes the spread, not which
+        #: instruments are traded, so it never restarts the engine.
+        self.fx = dict(fx or {})
         self.accounts = dict(accounts or {})
         self.pairs = dict(pairs or {})
         self.settings = dict(DEFAULT_SETTINGS)
@@ -805,7 +995,8 @@ class TraderConfig:
                     for name, acct in (raw.get('accounts') or {}).items()}
         pairs = {key: PairConfig.from_dict(key, pair)
                  for key, pair in (raw.get('pairs') or {}).items()}
-        return cls(accounts, pairs, raw.get('settings'), path)
+        return cls(accounts, pairs, raw.get('settings'), path,
+                   fx=raw.get('fx'))
 
     @classmethod
     def from_file(cls, path):
@@ -819,6 +1010,7 @@ class TraderConfig:
             'accounts': {n: a.to_dict() for n, a in self.accounts.items()},
             'pairs': {k: p.to_dict() for k, p in self.pairs.items()},
             'settings': dict(self.settings),
+            'fx': dict(self.fx),
         }
 
     def restart_required(self, fresh):
@@ -951,6 +1143,110 @@ def login_clash(raw, name, login):
     return None
 
 
+#: The file an account's MetaTrader 5 is launched from.
+TERMINAL_EXE = 'terminal64.exe'
+
+
+def clean_terminal_path(value):
+    """A terminal path as it was typed or pasted, made into a path.
+
+    Windows' "Copy as path" wraps what it copies in double quotes, and
+    a path pasted from it was saved with them: the file was exactly
+    where the path said, and the desk still would not start, because
+    Windows was asked for a file whose name begins with a quote. So the
+    whitespace and any matching quotes around the path come off, here,
+    where every reader of the path goes through.
+    """
+    text = str(value or '').strip()
+    while len(text) >= 2 and text[0] == text[-1] and text[0] in '"\'':
+        text = text[1:-1].strip()
+    return text
+
+
+def terminal_file(value):
+    """The terminal64.exe a typed path means.
+
+    A FOLDER that holds terminal64.exe means that file: "the MetaTrader
+    folder" is what a person picks, and asking them to know which file
+    inside it to name is asking a trader to do a technician's job.
+    """
+    path = clean_terminal_path(value)
+    if path and os.path.isdir(path):
+        inside = os.path.join(path, TERMINAL_EXE)
+        if os.path.isfile(inside):
+            return inside
+    return path
+
+
+def terminal_missing(value):
+    """Why this account's MetaTrader 5 cannot be launched, in words that
+    say what to do - or None when it can.
+
+    Blank is NOT missing: it means attach to whichever terminal is
+    already open, which is a choice.
+    """
+    path = clean_terminal_path(value)
+    if not path:
+        return None
+    if os.path.isfile(path):
+        return None
+    if os.path.isdir(path):
+        return (f"{path} is a folder with no {TERMINAL_EXE} in it. Pick "
+                f"this account's MetaTrader 5 from the list of the ones "
+                f"installed on this PC.")
+    return (f"There is no MetaTrader 5 at {path}. Pick this account's "
+            f"MetaTrader 5 from the list of the ones installed on this PC, "
+            f"or correct the path.")
+
+
+def terminal_roots():
+    """Where a MetaTrader 5 is looked for on THIS PC: the Program Files
+    folders, and the top of the drive - where a second, portable copy
+    usually sits (C:\\MT5-A). None of it off Windows."""
+    if os.name != 'nt':
+        return []
+    roots = []
+    for key in ('ProgramFiles', 'ProgramW6432', 'ProgramFiles(x86)'):
+        folder = os.environ.get(key)
+        if folder and folder not in roots:
+            roots.append(folder)
+    drive = os.environ.get('SystemDrive', 'C:') + os.sep
+    if drive not in roots:
+        roots.append(drive)
+    return roots
+
+
+def find_terminals(raw=None, roots=None):
+    """Every MetaTrader 5 installed on this PC, for a person to PICK
+    rather than type: each folder one level under each root that holds
+    terminal64.exe, with the account already using it, if any.
+
+    One level and no deeper, on purpose: it is read every time the page
+    opens, and a walk of a whole drive is not.
+    """
+    roots = terminal_roots() if roots is None else roots
+    used = {}
+    for name, acct in ((raw or {}).get('accounts') or {}).items():
+        path = clean_terminal_path((acct or {}).get('terminal_path'))
+        if path:
+            used[os.path.normcase(os.path.normpath(path))] = name
+    found, seen = [], set()
+    for root in roots:
+        try:
+            children = sorted(os.listdir(root))
+        except OSError:
+            continue
+        for child in children:
+            path = os.path.join(root, child, TERMINAL_EXE)
+            key = os.path.normcase(os.path.normpath(path))
+            if key in seen or not os.path.isfile(path):
+                continue
+            seen.add(key)
+            found.append({'path': path, 'folder': child,
+                          'used_by': used.get(key)})
+    return found
+
+
 def terminal_clash(raw, name, path):
     """One account needs one PORT, one LOGIN and one TERMINAL.
 
@@ -959,13 +1255,15 @@ def terminal_clash(raw, name, path):
     trade whatever it happens to be signed into, and the pair hedges
     against itself.
     """
-    path = (path or '').strip()
+    path = clean_terminal_path(path)
     if not path:
         return None                # blank = attach to whatever is open
     for other, acct in (raw.get('accounts') or {}).items():
         if other == name:
             continue
-        if ((acct or {}).get('terminal_path') or '').strip().lower() \
+        # Cleaned on both sides: one copy quoted and one not is still
+        # ONE installation.
+        if clean_terminal_path((acct or {}).get('terminal_path')).lower() \
                 == path.lower():
             return (f"Account '{other}' already uses this MT5 installation. "
                     f"One terminal serves ONE login, so both legs would end "
@@ -973,6 +1271,33 @@ def terminal_clash(raw, name, path):
                     f"MetaTrader 5 in its own folder (or use a portable "
                     f"copy) and point this account at that one.")
     return None
+
+
+def engine_hold_reasons(raw):
+    """Why the launcher will not run the ENGINE on this config, one line
+    per problem in words, or [].
+
+    ONE list, read by two processes: the launcher, which holds the
+    engine on it (`start.check_config`), and the web screen, which says
+    WHY on the status line - so a person looking at a screen that is
+    not trading is told what to fix and where, instead of "ENGINE DOWN".
+    """
+    problems = []
+    for name, account in (raw.get('accounts') or {}).items():
+        account = account or {}
+        endpoint = (account.get('endpoint') or '').strip()
+        for problem in (endpoint_clash(raw, name, endpoint),
+                        login_clash(raw, name, account.get('login')),
+                        terminal_clash(raw, name,
+                                       account.get('terminal_path')),
+                        # A MetaTrader 5 that is not where the account
+                        # says. Held with the screen UP - the Exchanges
+                        # page is where it is picked - not refused
+                        # before the screen exists.
+                        terminal_missing(account.get('terminal_path'))):
+            if problem:
+                problems.append(f"account '{name}': {problem}")
+    return problems
 
 
 def next_free_port(raw, host='127.0.0.1', first=9101):
@@ -999,6 +1324,14 @@ def env_key_for(account_name):
     slug = _ENV_SAFE.sub('_', (account_name or '').upper().strip())
     slug = re.sub(r'_+', '_', slug).strip('_') or 'ACCOUNT'
     return f'MT5_PASSWORD_{slug}'
+
+
+def arrow_env_key(account_name, what):
+    """The .env key for one of an Arrow account's secrets:
+    ARROW_PASSWORD_<ACCOUNT>, ARROW_API_SECRET_<ACCOUNT>,
+    ARROW_TOTP_SECRET_<ACCOUNT>. Same sanitising as `env_key_for`."""
+    slug = env_key_for(account_name)[len('MT5_PASSWORD_'):]
+    return f'ARROW_{what}_{slug}'
 
 
 def env_line(key, value):

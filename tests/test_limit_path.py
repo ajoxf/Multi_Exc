@@ -12,6 +12,10 @@ from mt5trader.models import OrderState, OrderType, SpreadSide
 from mt5trader.quoter import implied_spread, peg_price, quoting_leg
 
 
+#: The one-leg quote (WORKING_ORDERS = QUOTE); see conftest.
+pytestmark = pytest.mark.quote
+
+
 @pytest.fixture
 def engine(config, pair, legs):
     coordinator = Coordinator(config, legs, sleep=lambda s: None)

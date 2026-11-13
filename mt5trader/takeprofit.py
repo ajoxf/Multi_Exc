@@ -40,6 +40,15 @@ def points(money, spread_units, quantity=1.0):
     return money / (float(spread_units) * float(quantity))
 
 
+def one_spread_units(position):
+    """`k` for ONE spread of `position`, from its whole-size k."""
+    units = getattr(position, 'spread_units', None)
+    quantity = getattr(position, 'quantity', None) or 1.0
+    if not units:
+        return None
+    return float(units) / float(quantity)
+
+
 def commission(pair, settings, quantity=1.0):
     """Commission for one round turn of `quantity` spreads, in money."""
     from . import costs
@@ -253,7 +262,12 @@ def for_position(position, md, pair, settings, margin_per_spread=None,
     if position is None or position.entry_spread is None:
         return None
     quantity = position.quantity or 1.0
-    units = position.spread_units
+    # A POSITION's spread_units is its WHOLE size already (0.05 lots x
+    # 1,000 = 50 for half a spread of 0.1 lots); every formula below
+    # takes k for ONE spread and multiplies by `quantity` itself. Passing
+    # the whole one charged the size twice: at 0.5 spreads the TP and SL
+    # sat twice as far away as the % asked for.
+    units = one_spread_units(position)
     # The same four terms as the pre-trade box, so the two never
     # disagree about what break-even means — only the anchor differs.
     terms = break_even_terms(pair, md, settings, quantity, units, nights,

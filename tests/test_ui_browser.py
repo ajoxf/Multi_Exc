@@ -12,6 +12,7 @@ so Chrome refused to submit and fired no event at all.
 """
 
 import json
+import math
 import re
 import os
 import threading
@@ -89,13 +90,6 @@ class Publisher:
         #: publishes it — including the case where the reading is
         #: REPLACED by a warning about the input it came from.
         self.fair = None
-        #: AutoRouting: the switch, and what is ACTUALLY resting.
-        self.auto_route = False
-        self.auto_route_armed = None
-        #: The system-wide switch, off by default in the engine. The
-        #: fixture leaves it ON so the per-ladder tick is what is under
-        #: test; the test that turns it off is testing the master.
-        self.auto_route_master = True
         #: The fair-value window is per pair and off by default; the
         #: fixture turns it on so the panels it holds can be read.
         self.show_fair_window = True
@@ -126,6 +120,8 @@ class Publisher:
         #: against the broker's own number.
         self.resting_closes = 0
         self.broker_pendings = None
+        #: Any other field for the pair's row, as the engine sends it.
+        self.pair_extra = {}
         #: Which leg LIMIT mode rests its real pending on. The other
         #: leg is crossed at market when it fills, and a broker window
         #: showing nothing on that leg is the mode, not a fault.
@@ -145,8 +141,6 @@ class Publisher:
         payload = snapshot(self.order_type, self.confirm, self.same_login,
                            self.stale_leg, self.dead_orders, self.exits,
                            self.positions, self.unclaimed, self.fair,
-                           self.auto_route, self.auto_route_armed,
-                           self.auto_route_master,
                            self.show_fair_window, self.orders,
                            self.quotes, self.working_buys,
                            self.working_sells, self.algo, self.algo_block,
@@ -155,6 +149,10 @@ class Publisher:
                            self.broker_pendings, self.max_qty)
         if at is not None:
             payload['at'] = at
+        if getattr(self, 'arb_events', None) is not None:
+            payload['arb_events'] = self.arb_events
+        for row in payload['pairs'].values():
+            row.update(self.pair_extra)
         # A tmp name of its OWN. The timer thread and the test publish
         # at the same moment often enough to matter: sharing one tmp
         # file, the slower writer's file is gone before it renames it,
@@ -197,8 +195,7 @@ def server(tmp_path_factory):
 def snapshot(order_type='LIMIT', confirm=False, same_login=None,
              stale_leg=False, dead_orders=None, exits=None,
              positions=None, unclaimed=None, fair=None,
-             auto_route=False, auto_route_armed=None,
-             auto_route_master=True, show_fair_window=True, orders=None, quotes=None,
+             show_fair_window=True, orders=None, quotes=None,
              working_buys=0, working_sells=0, algo='NONE', algo_block=None,
              net_position=0.0, quoting_leg='b', exit_type='MARKET',
              resting_closes=0, broker_pendings=None, max_qty=None):
@@ -251,15 +248,13 @@ def snapshot(order_type='LIMIT', confirm=False, same_login=None,
                 # What both brokers will take, in Qty. The keypad reads
                 # it; None where neither caps volume.
                 'max_qty': max_qty,
-                'auto_route': auto_route,
-                'auto_route_on': bool(auto_route and auto_route_master),
-                'auto_route_master': bool(auto_route_master),
                 'algo': algo,
+                'algo_on': algo == 'ALGO',
+                'algo_mode': (algo_block or {}).get('mode') or 'DRY_RUN',
                 'algo_window': show_fair_window,
                 'algo_block': algo_block or {'algo': algo,
                                              'window': show_fair_window},
                 'show_fair_window': show_fair_window,
-                'auto_route_armed': auto_route_armed or [],
                 'clip_lots_a': 0.1, 'clip_lots_b': 0.1, 'spread_units': 10.0,
                 'contract_a': 100.0, 'contract_b': 100.0,
                 'short_spread': 59.09, 'long_spread': 59.11,
@@ -323,7 +318,8 @@ def chromium_path():
     None lets Playwright find its own.
     """
     root = Path(os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '/opt/pw-browsers'))
-    for candidate in sorted(root.glob('chromium-*/chrome-linux/chrome')):
+    for candidate in sorted(list(root.glob('chromium-*/chrome-linux/chrome'))
+                            + list(root.glob('chromium-*/chrome-linux64/chrome'))):
         return str(candidate)
     return None
 
@@ -602,7 +598,9 @@ def test_three_clicks_at_one_price_send_three_orders(page):
     for _ in range(3):
         cell.click()
         page.wait_for_timeout(120)
-    assert command_count(page) == before + 3
+    # The server writes each command after its POST lands; on a slow
+    # runner the last clicks are still in flight when the loop ends.
+    assert wait_for_commands(page, before + 3) == before + 3
     levels = {json.loads(line)['payload']['level']
               for line in commands(page)[-3:]}
     assert len(levels) == 1                       # same price, three orders
@@ -716,6 +714,16 @@ def commands(page):
 
 def command_count(page):
     return len(commands(page))
+
+
+def wait_for_commands(page, count, timeout_ms=5000):
+    """The command count once it reaches `count`, or what it is when
+    `timeout_ms` runs out."""
+    waited = 0
+    while command_count(page) < count and waited < timeout_ms:
+        page.wait_for_timeout(50)
+        waited += 50
+    return command_count(page)
 
 
 def last_command(page):
@@ -948,6 +956,59 @@ def test_the_exchanges_page_carries_connect_test_and_diagnose(page):
     assert 'Exchanges' in page.text_content('.window.settings .accounts h3')
 
 
+def test_an_accounts_metatrader_is_PICKED_and_fixed_on_the_screen(
+        page, tmp_path, monkeypatch):
+    """A desk would not start because the MetaTrader path had been pasted
+    with Windows' quotes, and the person at it does not open config
+    files. The row says what is wrong; the installed terminals are a list
+    to pick from; the pick survives the page's own repaint; Save fixes
+    it."""
+    from mt5trader import config as cfg
+    root = tmp_path / 'Program Files'
+    (root / 'CFI2 MetaTrader 5 Terminal').mkdir(parents=True)
+    exe = root / 'CFI2 MetaTrader 5 Terminal' / 'terminal64.exe'
+    exe.write_text('', encoding='utf-8')
+    monkeypatch.setattr(cfg, 'terminal_roots', lambda: [str(root)])
+
+    page.click('#open-settings')
+    page.wait_for_selector('.window.settings')
+    page.evaluate("""async (gone) => {
+        await fetch('/api/accounts/CFI Spot', {method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({terminal_path: gone})});
+        await window.MT5Settings.refresh();
+    }""", '"' + str(tmp_path / 'gone' / 'terminal64.exe') + '"')
+    row = page.locator('tr[data-account="CFI Spot"]')
+    problem = page.locator('tr[data-account="CFI Spot"] + tr.problem')
+    page.wait_for_selector('tr[data-account="CFI Spot"] .f-terminal-pick',
+                           timeout=WAIT)
+    # Said on the line under the row, in words, with what to do.
+    assert 'no MetaTrader 5 at' in problem.text_content()
+    assert 'Pick' in problem.text_content()
+
+    row.locator('.f-terminal-pick').select_option(str(exe))
+    assert row.locator('.f-terminal').input_value() == str(exe)
+    # The page repaints itself every few seconds; an unsaved pick must
+    # not be wiped by it.
+    page.evaluate('() => window.MT5Settings.render()')
+    row = page.locator('tr[data-account="CFI Spot"]')
+    assert row.locator('.f-terminal').input_value() == str(exe)
+
+    page.wait_for_selector('.toast.ok:has-text("press Save")', timeout=WAIT)
+    row.locator('.save-account').click()
+    page.wait_for_selector('.toast.ok:has-text("restarts by itself")',
+                           timeout=WAIT)
+    stored = json.load(open(page.paths['config'], encoding='utf-8'))
+    assert stored['accounts']['CFI Spot']['terminal_path'] == str(exe)
+    page.evaluate('() => window.MT5Settings.refresh()')
+    page.wait_for_timeout(200)
+    row = page.locator('tr[data-account="CFI Spot"]')
+    assert page.locator(
+        'tr[data-account="CFI Spot"] + tr.problem').count() == 0
+    assert 'this account' in row.locator(
+        '.f-terminal-pick option:checked').text_content()
+
+
 def test_the_exit_costs_belong_to_ONE_LADDER_and_the_override_CLEARS(page):
     """Commission, the allowance, the nights and the target are not one
     trade repeated: a gold basis and an oil differential are charged
@@ -964,7 +1025,7 @@ def test_the_exit_costs_belong_to_ONE_LADDER_and_the_override_CLEARS(page):
 
     for field in ('.ls-comm-a', '.ls-comm-b', '.ls-slip',
                   '.ls-nights', '.ls-tp', '.ls-carry-rate',
-                  '.ls-auto-route', '.ls-overnight'):
+                  '.ls-overnight'):
         assert page.locator(
             '.ladder .ladder-settings ' + field).count() == 1, field
 
@@ -1027,8 +1088,11 @@ def test_every_setting_shows_the_value_ACTUALLY_IN_FORCE(page):
     try:
         page.click('.ladder .ladder-cog')
         page.wait_for_function(
-            "() => document.querySelector('.ladder .ls-comm-a').value !== ''",
-            timeout=WAIT)
+            # The pair's OWN cost, which only the stubbed fetch carries:
+            # the form has been filled from it. "Not blank" was met by a
+            # value left in the box from before the fetch landed.
+            "() => document.querySelector('.ladder .ls-comm-b').value "
+            "=== '3.5'", timeout=WAIT)
 
         # What the ladder is RUNNING, from the snapshot — never blank.
         assert page.input_value('.ladder .ls-order-type') == 'LIMIT'
@@ -1095,13 +1159,12 @@ def test_a_cost_typed_on_one_ladder_is_saved_to_THAT_pair(page):
 
 def test_the_rail_carries_no_form_the_market_can_outrun(page):
     """The rail is read top to bottom while the market moves. The
-    overnight rule and the AutoRoute switch are exit logic, not
-    something pressed at the touch, so they are in this ladder's
-    settings — and the three cancels are one row, not three."""
+    overnight rule is exit logic, not something pressed at the touch,
+    so it is in this ladder's settings — and the three cancels are one
+    row, not three."""
     open_ladder(page)
 
     assert page.locator('.ladder .rail .overnight').count() == 0
-    assert page.locator('.ladder .rail .auto-route').count() == 0
     assert page.locator('.ladder .rail .cxl-row .cxl').count() == 3
 
     # ...and the rail fits without scrolling at the default size.
@@ -1171,6 +1234,9 @@ def test_the_operator_is_told_when_the_system_is_connected(page):
     # Nothing is really connected in this fixture, and it says so
     # plainly rather than showing a green light.
     assert 'NOT READY' in page.text_content('.conn')
+    # A toast an earlier test left up (an "applied to ..." lasts four
+    # seconds) is not the one this test is about.
+    page.evaluate("() => document.getElementById('toasts').innerHTML = ''")
 
     page.evaluate("""() => {
         window.__realFetch = window.__realFetch || window.fetch;
@@ -1202,8 +1268,8 @@ def test_the_operator_is_told_when_the_system_is_connected(page):
     assert "the 16:55 cutoff is on the broker's clock" in \
         page.text_content('.conn.up')
     # It is also said once, out loud.
-    page.wait_for_selector('.toast.ok', timeout=WAIT)
-    assert 'You can trade' in page.text_content('.toast.ok')
+    page.wait_for_selector('.toast.ok:has-text("You can trade")',
+                           timeout=WAIT)
     page.evaluate('() => { window.fetch = window.__realFetch; }')
 
 
@@ -1292,9 +1358,37 @@ def drag(page, selector, dx, dy, steps=8):
     """
     settle(page, selector)
     start = grab_point(page, selector)
+    # The whole desk at the press, and just after it: on CI the ladder
+    # has been seen to be at x 141 when measured and at x 4 by the
+    # first step, so the jump is somewhere around here.
+    desk = """(sel) => {
+        const node = document.querySelector(sel);
+        const desk = document.getElementById('desktop');
+        return {node: Math.round(node.getBoundingClientRect().left),
+                scroll: desk.scrollLeft, active: window.MT5Trader.state.active,
+                windows: Array.from(desk.querySelectorAll('.window')).map(
+                    w => w.className.replace('window ', '') + '@' +
+                         Math.round(w.getBoundingClientRect().left) + '/' +
+                         Math.round(w.getBoundingClientRect().width))};
+    }"""
+    page.trace = [{'pre': page.evaluate(desk, selector), 'grab': start}]
     page.mouse.move(*start)
     page.mouse.down()
-    page.mouse.move(start[0] + dx, start[1] + dy, steps=steps)
+    page.trace.append({'down': page.evaluate(desk, selector)})
+    # One step at a time, and what the window and the desk did at each,
+    # so a drag that stops short says WHERE and WHY in the failure.
+    for i in range(1, steps + 1):
+        page.mouse.move(start[0] + dx * i / steps, start[1] + dy * i / steps)
+        page.trace.append(page.evaluate(
+            """(sel) => {
+                const node = document.querySelector(sel);
+                const desk = document.getElementById('desktop');
+                return {x: Math.round(node.getBoundingClientRect().left),
+                        left: node.style.left,
+                        dragging: node.classList.contains('dragging'),
+                        scroll: desk.scrollLeft, width: desk.clientWidth,
+                        windows: desk.querySelectorAll('.window').length};
+            }""", selector))
     assert started(page, selector), (
         'the press missed the title bar, so nothing was dragged')
     page.mouse.up()
@@ -1398,8 +1492,10 @@ def settle(page, selector):
 #: does in life, and can never overwrite what the test put there.
 HOLD_THE_SNAPSHOT = """() => {
     window.__realFetch = window.__realFetch || window.fetch;
+    window.__held = 0;
     window.fetch = function (url, options) {
         if (String(url).indexOf('/api/status') >= 0) {
+            window.__held += 1;
             return Promise.resolve(new Response(
               JSON.stringify(window.MT5Trader.state.snapshot || {}),
               {status: 200, headers: {'Content-Type': 'application/json'}}));
@@ -1413,7 +1509,17 @@ RELEASE_THE_SNAPSHOT = ("() => { if (window.__realFetch) "
 
 
 def tidy(page):
+    """Tidy the desk, and WAIT for it to be tidy.
+
+    Tidy re-lays the row, and on a slow runner the windows can still be
+    moving when the click returns; a position read then is where a
+    window WAS.
+    """
     page.click('#tidy')
+    # A fresh baseline: two readings from THIS layout, not one left
+    # over from a previous test's.
+    page.evaluate("() => { window.__settleWas = {}; }")
+    settle(page, '.window.ladder')
 
 
 def open_ladder(page):
@@ -1502,7 +1608,9 @@ def test_a_window_goes_where_it_is_dragged_and_is_still_there_after_a_reload(
     drag(page, '.window.ladder', 220, 130)
 
     after = page.locator('.window.ladder').first.bounding_box()
-    assert after['x'] - before['x'] == pytest.approx(220, abs=6)
+    assert after['x'] - before['x'] == pytest.approx(220, abs=6), (
+        f'room {room}, before {before}, after {after}, '
+        f'steps {getattr(page, "trace", None)}')
     assert after['y'] - before['y'] == pytest.approx(130, abs=6)
     assert page.locator('.window.ladder.floating').count() == 1
 
@@ -1752,6 +1860,57 @@ def test_tidy_puts_every_window_back_in_the_row(page):
             None, '{}')
 
 
+def test_tidy_keeps_the_fair_window_in_the_row_across_renders(page):
+    """The fair window floats to its own corner by default. Tidy puts it
+    in the row — and it has to STAY there: it used to float off again on
+    the next render, shifting the row under the pointer, so a ladder
+    grabbed just after Tidy jumped sideways by the fair window's width."""
+    open_ladder(page)
+    # A FRESH fair window: closed first, so no earlier test's Tidy is on it.
+    page.evaluate(
+        "() => window.MT5Trader.showFairWindow('XAUUSD_|GC1226', false)")
+    page.wait_for_selector('.window.fairwin', state='detached',
+                           timeout=WAIT)
+    page.evaluate("""() => {
+        window.localStorage.removeItem('mt5trader.windows.v1');
+        window.MT5Trader.showFairWindow('XAUUSD_|GC1226', true);
+    }""")
+    page.wait_for_selector('.window.fairwin', timeout=WAIT)
+    try:
+        # The control: untidied, it floats by default.
+        page.evaluate("() => window.MT5Trader.render()")
+        assert page.locator('.window.fairwin.floating').count() == 1
+        tidy(page)
+        for _ in range(3):
+            page.evaluate("() => window.MT5Trader.render()")
+        assert page.locator('.window.floating').count() == 0
+        ladder_x = page.locator('.window.ladder').first.bounding_box()['x']
+        page.evaluate("() => window.MT5Trader.render()")
+        assert page.locator('.window.ladder').first.bounding_box()['x'] == \
+            pytest.approx(ladder_x, abs=1)
+    finally:
+        page.evaluate(
+            "() => window.MT5Trader.showFairWindow('XAUUSD_|GC1226', false)")
+
+
+def test_a_floating_ladder_is_really_lifted_out_of_the_row(page):
+    """`.window.ladder { position: relative }` used to beat
+    `.window.floating` on source order: a dragged ladder stayed in the
+    row, its `left` counted from where the row put it, and with a window
+    in front of it, it jumped by that window's width when grabbed."""
+    open_ladder(page)
+    tidy(page)
+    page.evaluate("""() => {
+        const node = document.querySelector('.window.ladder');
+        node.classList.add('floating');
+    }""")
+    position = page.evaluate(
+        "() => getComputedStyle(document.querySelector('.window.ladder'))"
+        ".position")
+    page.evaluate("() => window.MT5Trader.tidyWindows()")
+    assert position == 'absolute'
+
+
 def seed_config(page, pairs=True):
     """A saved account and pair, as a configured install has."""
     config = {'accounts': {'acct_a': {'endpoint': '127.0.0.1:9101'},
@@ -1873,16 +2032,29 @@ def test_the_pairs_table_says_whether_each_ladder_is_actually_quoting(page):
     assert 'CONNECTED' in cell.text_content()
 
     # ...and when the engine reports a problem on that pair, the row
-    # carries the engine's own words rather than a green light.
-    page.evaluate("""() => {
-        const pairs = window.MT5Trader.state.snapshot.pairs;
-        const key = Object.keys(pairs)[0];
-        pairs[key].errors = ["leg A: 'XAUUSD_' is not on account 'leg_a'"];
-        window.MT5Settings.render();
-    }""")
-    text = page.text_content('td.pair-status')
-    assert "is not on account" in text
-    assert page.locator('td.pair-status.c-fail').count() >= 1
+    # carries the engine's own words rather than a green light. HELD
+    # first: a poll landing after the error is written replaces the
+    # snapshot and takes the error away before the row is read.
+    page.evaluate(HOLD_THE_SNAPSHOT)
+    try:
+        page.wait_for_function("() => window.__held >= 2", timeout=WAIT)
+        page.evaluate("""() => {
+            const pairs = window.MT5Trader.state.snapshot.pairs;
+            const key = Object.keys(pairs)[0];
+            pairs[key].errors = ["leg A: 'XAUUSD_' is not on account 'leg_a'"];
+            window.MT5Settings.render();
+        }""")
+        text = page.text_content('td.pair-status')
+        assert "is not on account" in text
+        assert page.locator('td.pair-status.c-fail').count() >= 1
+    finally:
+        page.evaluate("""() => {
+            const pairs = window.MT5Trader.state.snapshot.pairs;
+            Object.keys(pairs).forEach(function (key) {
+                delete pairs[key].errors;
+            });
+        }""")
+        page.evaluate(RELEASE_THE_SNAPSHOT)
 
 
 def test_a_repaint_under_the_pointer_does_not_swallow_the_click(page):
@@ -2152,44 +2324,52 @@ def test_the_sounds_are_generated_here_and_can_be_silenced(page):
 def test_a_pair_added_while_the_screen_is_open_gets_its_own_ladder(page):
     """A pair configured on the Exchanges page and then nowhere to be
     seen is the whole setup looking broken. It appears beside the
-    others, and a ladder the trader CLOSED stays closed."""
-    page.evaluate("""() => {
-        const state = window.MT5Trader.state;
-        state.closed = {};
-        const pairs = state.snapshot.pairs;
-        const copy = JSON.parse(JSON.stringify(pairs['XAUUSD_|GC1226']));
-        copy.key = 'EURUSD|GBPUSD';
-        copy.name = 'EURUSD - GBPUSD';
-        copy.symbol_a = 'EURUSD';
-        copy.symbol_b = 'GBPUSD';
-        pairs['EURUSD|GBPUSD'] = copy;
-        window.MT5Trader.render();
-    }""")
-    # The snapshot the publisher writes does not have it, so drive one
-    # poll's worth of the same logic the poller runs.
-    page.evaluate("""() => {
-        const state = window.MT5Trader.state;
-        Object.keys(state.snapshot.pairs).forEach(function (key) {
-            const id = window.MT5Trader.panelId('ladder', key);
-            if (state.open.indexOf(id) < 0 && !state.closed[id]) {
-                state.open.unshift(id);
-            }
-        });
-        window.MT5Trader.render();
-    }""")
+    others, and a ladder the trader CLOSED stays closed.
 
-    assert page.locator('.window.ladder').count() == 2
-    assert 'EURUSD - GBPUSD' in page.text_content('#tabs')
-
-    # Closed stays closed.
-    page.evaluate("""() => window.MT5Trader.closePanel(
-        window.MT5Trader.panelId('ladder', 'EURUSD|GBPUSD'))""")
-    page.wait_for_timeout(700)
-    assert page.locator('.window.ladder').count() == 1
+    The SERVER gains the pair: every /api/status from here on carries
+    it, and the real poller opens its ladder. Pushing it into the page's
+    snapshot by hand raced that poller — a poll landing between two
+    steps replaced the snapshot and took the added pair away with it.
+    """
     page.evaluate("""() => {
-        delete window.MT5Trader.state.snapshot.pairs['EURUSD|GBPUSD'];
-        window.MT5Trader.render();
+        window.MT5Trader.state.closed = {};
+        window.__realFetch = window.__realFetch || window.fetch;
+        window.fetch = function (url, options) {
+            const answer = window.__realFetch(url, options);
+            if (String(url).indexOf('/api/status') < 0) { return answer; }
+            return answer.then(function (r) { return r.json(); })
+              .then(function (snapshot) {
+                const pairs = snapshot.pairs || {};
+                const copy = JSON.parse(JSON.stringify(
+                    pairs['XAUUSD_|GC1226']));
+                copy.key = 'EURUSD|GBPUSD';
+                copy.name = 'EURUSD - GBPUSD';
+                copy.symbol_a = 'EURUSD';
+                copy.symbol_b = 'GBPUSD';
+                pairs['EURUSD|GBPUSD'] = copy;
+                return new Response(JSON.stringify(snapshot), {status: 200,
+                    headers: {'Content-Type': 'application/json'}});
+              });
+        };
     }""")
+    try:
+        page.wait_for_function(
+            "() => document.querySelectorAll('.window.ladder').length === 2",
+            timeout=WAIT)
+        assert 'EURUSD - GBPUSD' in page.text_content('#tabs')
+
+        # Closed stays closed — across polls that still carry the pair.
+        page.evaluate("""() => window.MT5Trader.closePanel(
+            window.MT5Trader.panelId('ladder', 'EURUSD|GBPUSD'))""")
+        page.wait_for_timeout(1200)
+        assert page.locator('.window.ladder').count() == 1
+    finally:
+        page.evaluate("""() => {
+            window.fetch = window.__realFetch || window.fetch;
+        }""")
+        page.wait_for_function(
+            "() => !('EURUSD|GBPUSD' in "
+            "(window.MT5Trader.state.snapshot.pairs || {}))", timeout=WAIT)
 
 
 def test_a_window_opened_at_the_end_of_the_row_is_scrolled_into_view(page):
@@ -2841,28 +3021,26 @@ def test_the_fair_window_is_no_bigger_than_the_figures_in_it(page):
     assert clipped == 0
 
 
-def test_the_fair_window_is_ONE_tick_on_the_ladder_it_belongs_to(page):
-    """Per ladder, off by default, and one control for one decision.
+def test_the_window_is_ONE_choice_on_the_ladder_it_belongs_to(page):
+    """Per ladder, None by default, and one control for one decision.
 
-    There was a dropdown here (None / Fair spread) beside a Show window
-    tick, back when a second algo was being built. That algo was taken
-    out; two controls for one decision stayed, and either one alone did
-    nothing anybody could see."""
+    There was a dropdown (None / Fair spread) beside a Show window tick
+    once, and either alone did nothing anybody could see. Now there are
+    two readings — Fair spread and the Algo — and still ONE control
+    picks which the window shows. No tick beside it."""
     open_ladder(page)
     page.click('.ladder .ladder-cog')
-    page.wait_for_selector('.ladder .ls-algo-window', timeout=WAIT)
+    page.wait_for_selector('.ladder .ls-algo', timeout=WAIT)
 
-    assert page.locator('.ladder .ls-algo').count() == 0
-    assert page.locator('.ladder .ls-algo-window').count() == 1
-    # It lives with the Carry fields it is a reading of, not in a group
-    # of its own.
-    assert page.locator(
-        '.ladder .ls-group:has(.ls-pair-type) .ls-algo-window').count() == 1
-    # Scoped to the CARRY group: the Trading group carries a note of
-    # its own now (what one spread means in lots).
+    assert page.locator('.ladder .ls-algo').count() == 1
+    assert page.locator('.ladder .ls-algo-window').count() == 0
+    options = page.eval_on_selector(
+        '.ladder .ls-algo', 'el => [...el.options].map(o => o.value)')
+    assert options == ['NONE', 'FAIR_SPREAD', 'ALGO', 'ALGO_LIVE']
+    # The group says out loud what the Algo is NOT.
     note = ' '.join(page.text_content(
-        '.ladder .ls-group:has(.ls-pair-type) .lsf-note').split())
-    assert 'it does not trade' in note
+        '.ladder .ls-group:has(.ls-algo) .lsf-note').split())
+    assert 'nothing is sent' in note and 'clicks on the ladder work' in note
     page.click('.ladder .ls-close')
 
 
@@ -2925,72 +3103,19 @@ def test_GTC_carries_its_caveat_on_the_screen(page):
         '.ladder .tif option[value="GTC"]', 'title')
 
 
-def test_autorouting_says_what_is_armed_and_that_there_is_no_stop(page):
-    """The switch is not the state. A trader who believes a target is
-    armed when it is not is the worse failure, so the Exit panel shows
-    what is ACTUALLY resting — while the switch itself lives in this
-    ladder\'s settings, because one ladder can arm AutoRouting and the
-    next not."""
+def test_AutoRouting_is_gone_from_every_screen(page):
+    """AutoRouting has been removed: the Algo is the one thing that
+    exits by itself, and two would confuse the desk. No tick in the
+    ladder's settings, no row on the Exit panel, no AUTO in the title."""
     open_ladder(page)
-    assert page.text_content('.fairwin .auto-route-state') == 'off'
-
-    page.paths['publisher'].auto_route = True
-    page.paths['publisher'].auto_route_armed = [
-        {'position_id': 'POS1', 'level': 60.21, 'order_id': 'SO1',
-         'quantity': 1.0}]
-    page.paths['publisher'].publish()
-    page.wait_for_function(
-        "() => document.querySelector('.fairwin .auto-route-state')"
-        ".textContent.indexOf('60.21') >= 0", timeout=WAIT)
-    assert 'no stop' in page.get_attribute('.fairwin .auto-route-state',
-                                           'title')
-
-    # On, but nothing resting yet — and it says which of the two it is.
-    page.paths['publisher'].auto_route_armed = []
-    page.paths['publisher'].publish()
-    page.wait_for_function(
-        "() => document.querySelector('.fairwin .auto-route-state')"
-        ".textContent === 'on'", timeout=WAIT)
-    assert 'next fill' in page.get_attribute('.fairwin .auto-route-state',
-                                             'title')
-
-    # ...and the switch, with the NO STOP caveat, is in this ladder\'s
-    # own settings.
+    assert page.locator('.ls-auto-route').count() == 0
+    assert page.locator('.auto-route-state').count() == 0
+    assert 'AUTO' not in page.text_content('.ladder .mode-badge')
     page.click('.ladder .ladder-cog')
-    page.wait_for_selector('.ladder .ls-auto-route', timeout=WAIT)
-    assert 'NO STOP' in page.get_attribute('.ladder .lsf.check-row', 'title')
-    page.click('.ladder .ls-close')
-
-    page.paths['publisher'].auto_route = False
-    page.paths['publisher'].auto_route_armed = None
-    page.paths['publisher'].publish()
-
-
-def test_a_ladder_ticked_with_the_master_off_does_not_claim_AUTO(page):
-    """The tick alone used to put AUTO in the title bar. With the
-    system switch off nothing arms on a fill, and a badge saying
-    otherwise is the screen promising an exit that will not be there."""
-    open_ladder(page)
-    page.paths['publisher'].auto_route = True
-    page.paths['publisher'].auto_route_master = False
-    page.paths['publisher'].publish()
-    page.wait_for_function(
-        "() => document.querySelector('.ladder .mode-badge')"
-        ".textContent.indexOf('AUTO OFF') >= 0", timeout=WAIT)
-    assert 'switched off' in page.get_attribute('.ladder .mode-badge', 'title')
-    assert page.text_content('.fairwin .auto-route-state') == 'off'
-
-    # The control: the same tick with the master ON does say AUTO.
-    page.paths['publisher'].auto_route_master = True
-    page.paths['publisher'].publish()
-    page.wait_for_function(
-        "() => { var t = document.querySelector('.ladder .mode-badge')"
-        ".textContent; return t.indexOf('AUTO') >= 0"
-        " && t.indexOf('AUTO OFF') < 0; }", timeout=WAIT)
-    assert page.text_content('.fairwin .auto-route-state') == 'on'
-
-    page.paths['publisher'].auto_route = False
-    page.paths['publisher'].publish()
+    page.wait_for_selector('.ladder .ladder-settings .ls-tp', timeout=WAIT)
+    assert 'AutoRoute' not in page.text_content('.ladder .ladder-settings')
+    page.evaluate("() => document.querySelectorAll('.ladder-settings')"
+                  ".forEach(p => p.hidden = true)")
 
 
 def test_nothing_about_the_take_profit_is_sent_to_the_broker():
@@ -3467,15 +3592,15 @@ def test_ticking_the_setting_OPENS_the_fair_window(page):
 
     page.evaluate(SPY_ON_PAIR_SAVE)
     page.click('.ladder .ladder-cog')
-    page.wait_for_selector('.ladder .ls-algo-window', timeout=WAIT)
-    page.check('.ladder .ls-algo-window')
+    page.wait_for_selector('.ladder .ls-algo', timeout=WAIT)
+    page.select_option('.ladder .ls-algo', 'FAIR_SPREAD')
     page.click('.ladder .ls-save')
     page.wait_for_function("() => window.__sent !== null", timeout=WAIT)
 
     sent = page.evaluate('() => window.__sent')
     assert sent['algo_window'] is True
-    # The tick is the whole decision: `algo` is derived on the engine,
-    # so the form does not send one.
+    # The choice is the whole decision: `algo` is derived on the engine,
+    # so the form does not send one — and ALGO is never saved at all.
     assert 'algo' not in sent
     # ...and it is on the screen NOW, not a poll later and not only once
     # the engine has written the file back.
@@ -4977,8 +5102,14 @@ def test_a_partial_commission_total_says_how_many_fills_it_covers(page):
 
 
 def show_pnl_check(page, check):
-    """Put one pnl_check row on the monitor and hold it there."""
+    """Put one pnl_check row on the monitor and hold it there.
+
+    Two HELD polls first: a real /api/status already in flight when the
+    hold went on lands after it, replaces the snapshot, and takes the
+    row away with it.
+    """
     page.evaluate(HOLD_THE_SNAPSHOT)
+    page.wait_for_function("() => window.__held >= 2", timeout=WAIT)
     page.evaluate("""(check) => {
         const UI = window.MT5Trader;
         UI.state.snapshot.at = 1000.0;
@@ -5065,3 +5196,1067 @@ def test_an_unreadable_account_leaves_the_row_UNMEASURED(page):
         assert '$0.00' not in text.split('nothing to reconcile')[0][-120:]
     finally:
         page.evaluate(RELEASE_THE_SNAPSHOT)
+
+
+def test_the_live_chart_window_opens_from_the_ladder_and_closes(page):
+    """One chart per ladder, opened and closed by the trader — Mirror's
+    chart (the Algo's z between its lines, and the spread)."""
+    assert page.locator('.window.chartwin').count() == 0
+    page.click('.ladder .chart-btn')
+    page.wait_for_selector('.window.chartwin', timeout=WAIT)
+    # The same button closes it again...
+    page.click('.ladder .chart-btn')
+    page.wait_for_selector('.window.chartwin', state='detached', timeout=WAIT)
+    # ...and so does its own X.
+    page.click('.ladder .chart-btn')
+    page.wait_for_selector('.window.chartwin', timeout=WAIT)
+    page.click('.chartwin .close')
+    page.wait_for_selector('.window.chartwin', state='detached', timeout=WAIT)
+
+
+def test_money_is_written_in_the_pairs_own_currency(page):
+    """A rupee P&L printed with a dollar sign is out by the exchange
+    rate on the number a trader acts on."""
+    assert page.evaluate("MT5Trader.money(1234.5, 'INR')") == '₹1,234.50'
+    assert page.evaluate("MT5Trader.money(-5, 'USD')") == '-$5.00'
+    assert page.evaluate("MT5Trader.money(7, 'AED')") == 'AED 7.00'
+
+
+def test_a_lot_typed_on_the_pair_form_shows_its_contract_size_at_once(page):
+    """While the cursor is still in the field — the section is never
+    repainted under a focused input, so the working is updated in place."""
+    page.click('#open-settings')
+    page.wait_for_selector('.window.settings .new-pair', timeout=WAIT)
+    page.click('.window.settings .new-pair')
+    page.wait_for_selector('.p-unit-b', timeout=WAIT)
+    page.wait_for_function(
+        "document.querySelectorAll('.p-unit-b option').length > 3",
+        timeout=WAIT)
+    page.select_option('.p-unit-b', 'kg')
+    page.select_option('.p-lotunit-b', 'kg')
+    page.fill('.p-lotqty-b', '5')
+    page.wait_for_function(
+        "(document.querySelector('.contract-working-b') || {}).textContent"
+        " && document.querySelector('.contract-working-b').textContent"
+        ".indexOf('= 5 per lot') >= 0", timeout=WAIT)
+    assert page.evaluate("document.activeElement.className") == 'p-lotqty-b'
+    page.click('.window.settings .cancel-pair')
+    page.click('.window.settings .close')
+
+
+def test_a_new_arbitrage_alert_is_announced_once_and_not_replayed(server,
+                                                                   page):
+    """The banner names the pair and the edge, and says nothing was sent.
+    An alert that was already there when the page loaded is not replayed."""
+    url, paths = server
+    publisher = paths['publisher']
+    import time as _time
+    old = {'id': int((_time.time() - 600) * 1000), 'at': _time.time() - 600,
+           'pair': 'XAUUSD_|GC1226', 'text': 'OLD alert'}
+    publisher.arb_events = [old]
+    page.reload()
+    page.wait_for_selector('.window.ladder', timeout=WAIT)
+    page.wait_for_timeout(800)
+    assert page.locator('#arb-banner').count() == 0
+    page.wait_for_timeout(500)
+    assert page.locator('#arb-banner').count() == 0
+    fresh = _time.time() + 60
+    publisher.arb_events = [old, {'id': int(fresh * 1000), 'at': fresh,
+                                  'pair': 'XAUUSD_|GC1226',
+                                  'text': 'Gold basis: MCX RICH — net edge '
+                                          '22.00 per unit. Alert only — '
+                                          'nothing was sent.'}]
+    page.wait_for_selector('#arb-banner', timeout=WAIT)
+    text = page.text_content('#arb-banner')
+    assert 'ARBITRAGE ALERT' in text and 'nothing was sent' in text
+    assert 'OLD alert' not in text
+    page.click('#arb-banner .dismiss')
+    page.wait_for_selector('#arb-banner', state='detached', timeout=WAIT)
+    publisher.arb_events = None
+def _algo_block(**over):
+    block = {
+        'algo': 'ALGO', 'on': True, 'mode': 'DRY_RUN', 'state': 'SIGNAL',
+        'signal': 'SELL', 'ready': True, 'z_sell': 2.61, 'z_buy': 1.9,
+        'mean': 59.0, 'sigma': 0.04, 'upper': 59.10, 'lower': 58.90,
+        'count': 20, 'needed': 20, 'timeframe_min': 15, 'length': 20,
+        'params': {'entry_z': 2.5, 'confirm_ticks': 3, 'progress_bar': True,
+                   'stop_loss_on': True, 'max_trades_day': 10,
+                   'edge_capture_frac': 0.5},
+        'history': {'note': 'mt5'}, 'positions': [], 'health': None,
+        'day': {'trades': 2, 'losses_row': 0, 'pnl': 1.4},
+        'last_blocked': None, 'window': True,
+        'filters': {
+            'ready': True, 'qty': 1,
+            'cost': {'crossing': 2.0, 'commission': 1.0, 'slippage': 0.0,
+                     'total': 3.0},
+            'edge': {'on': True, 'ok': True, 'ratio': 2.4, 'required': 1.5,
+                     'capture': 7.2},
+            'probability': {'on': True, 'ok': True, 'win': 0.986,
+                            'ev': 4.1},
+            'regime': {'on': True, 'state': 'RANGE',
+                       'efficiency_ratio': 0.2, 'crossings': 9},
+            'half_life_minutes': 42.0, 'half_life_band': [0, 0]}}
+    block.update(over)
+    return block
+
+
+def test_the_Algo_has_a_window_of_its_own_with_the_three_panels(page):
+    """Signal & Position, Statistics, Filters — the stat-arb dashboard's
+    three panels — in one window per ladder while its Algo is on. The
+    control: the Algo off, and the window is gone."""
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block()
+    try:
+        publisher.publish()
+        page.wait_for_selector('.window.algowin', timeout=WAIT)
+        page.wait_for_function(
+            "() => (document.querySelector('.window.algowin .aw-signal')"
+            " || {textContent: ''}).textContent.includes('H to L signal')", timeout=WAIT)
+        text = page.text_content('.window.algowin')
+        for heading in ('Signal & Position', 'Statistics', 'Filters'):
+            assert heading.upper() in text.upper(), heading
+        assert 'H to L' in text and 'L to H' in text
+        assert '2.40' in text and 'req 1.5' in text        # capture / cost
+        assert 'Mean-rev' in text and '42 min' in text
+        assert page.locator('.window.algowin .aw-tile.sell.hit').count() == 1
+        assert page.text_content('.window.algowin .aw-mode') == 'SIGNALS'
+        # The Fair Spread window no longer carries the Algo.
+        assert 'H to L signal' not in (page.text_content('.window.fairwin')
+                                     if page.locator('.window.fairwin').count()
+                                     else '')
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+    page.wait_for_function(
+        "() => !document.querySelector('.window.algowin')", timeout=WAIT)
+
+
+def test_a_blocked_signal_names_the_filter_that_held_it(page):
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block(
+        state='BLOCKED', signal=None,
+        blocked='edge filter: capture 0.42x the cost, under the 1.5x required',
+        last_blocked={'side': 'SELL', 'z': 3.04, 'at': time.time(),
+                      'reason': 'edge filter: capture 0.42x the cost, under '
+                                'the 1.5x required'})
+    publisher.algo_block['filters']['edge'].update(ok=False, ratio=0.42)
+    try:
+        publisher.publish()
+        page.wait_for_function(
+            "() => (document.querySelector('.window.algowin .aw-blocked')"
+            " || {textContent: ''}).textContent.includes('edge filter')", timeout=WAIT)
+        assert 'H to L' in page.text_content('.window.algowin .aw-blocked')
+        assert page.locator('.window.algowin .aw-badge.bad').count() >= 1
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def test_in_a_position_the_Algo_window_shows_entry_legs_levels_and_the_bar(
+        page):
+    """In a position: what it is in, at what price, each leg's fill and
+    where it would close now, BE/TP/SL, and SL <- entry -> TP. The
+    control: flat, there is no position detail and no bar."""
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    publisher.algo = 'ALGO'
+    held = {'position_id': 'POS-7', 'side': 'BUY', 'quantity': 1,
+            'entry_spread': 59.11, 'closing_spread': 59.21, 'tp': 59.31,
+            'sl': 58.91, 'break_even': 59.13, 'progress': 0.5, 'exit': None,
+            'net_pnl': 0.8, 'entry_z': -2.6, 'age_sec': 125,
+            'leg_a_side': 'SELL', 'leg_a_entry': 4292.0, 'leg_a_now': 4292.2,
+            'leg_b_side': 'BUY', 'leg_b_entry': 4351.1, 'leg_b_now': 4351.4}
+    publisher.algo_block = _algo_block(state='IN_POSITION', signal=None,
+                                       positions=[held])
+    try:
+        publisher.publish()
+        page.wait_for_function(
+            "() => (document.querySelector('.window.algowin .aw-signal')"
+            " || {textContent: ''}).textContent.includes('BUY @ 59.11')", timeout=WAIT)
+        text = page.text_content('.window.algowin .aw-signal')
+        assert 'LONG' in text and 'TP 59.31' in text and 'SL 58.91' in text
+        assert '4351.10' in text and '4351.40' in text      # leg B fill/now
+        assert '50% to TP' in text
+        publisher.algo_block = _algo_block(state='WATCHING', signal=None)
+        publisher.publish()
+        page.wait_for_function(
+            "() => !document.querySelector('.window.algowin .algo-progress')",
+            timeout=WAIT)
+        assert 'FLAT' in page.text_content('.window.algowin .aw-signal')
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def test_the_ladder_title_bar_carries_the_Algo_switch(page):
+    """One click from the ladder: OFF / DRY RUN / LIVE. Picking LIVE
+    still asks first and sends nothing until confirmed."""
+    open_ladder(page)
+    page.paths['publisher'].publish()
+    page.wait_for_function(
+        "() => (document.querySelector('.ladder .algo-btn') || {})"
+        ".textContent === 'ALGO OFF'", timeout=WAIT)
+    page.evaluate(SPY_ON_COMMANDS)
+    try:
+        page.click('.ladder .algo-btn')
+        page.wait_for_selector('.ladder .algo-menu:not([hidden])',
+                               timeout=WAIT)
+        page.click('.ladder .algo-menu button[data-algo="ALGO_LIVE"]')
+        page.wait_for_selector('#modal:not(.hidden)', timeout=WAIT)
+        assert 'LIVE' in page.text_content('#modal-title')
+        assert algo_commands(page) == []                 # nothing sent yet
+        page.click('#modal-cancel')
+        # The control: a dry run goes straight through.
+        page.click('.ladder .algo-btn')
+        page.click('.ladder .algo-menu button[data-algo="ALGO"]')
+        page.wait_for_function(
+            "() => window.__commands.some(c => c.kind === 'set_algo')",
+            timeout=WAIT)
+        assert algo_commands(page)[-1]['payload']['mode'] == 'DRY_RUN'
+    finally:
+        page.evaluate('() => { window.fetch = window.__realFetch; }')
+
+
+def test_the_switch_says_LIVE_when_the_Algo_trades(page):
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block(mode='LIVE')
+    try:
+        publisher.publish()
+        page.wait_for_function(
+            "() => (document.querySelector('.ladder .algo-btn') || {})"
+            ".textContent === 'ALGO LIVE'", timeout=WAIT)
+        assert 'live' in page.get_attribute('.ladder .algo-btn', 'class')
+        assert page.text_content('.window.algowin .aw-mode') == 'LIVE'
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+    page.wait_for_function(
+        "() => (document.querySelector('.ladder .algo-btn') || {})"
+        ".textContent === 'ALGO OFF'", timeout=WAIT)
+
+def _ladder_with_algo(page, mode):
+    publisher = page.paths['publisher']
+    publisher.algo = 'ALGO'
+    publisher.algo_block = _algo_block(mode=mode)
+    publisher.publish()
+    want = 'ALGO LIVE' if mode == 'LIVE' else 'ALGO SIGNALS'
+    page.wait_for_function(
+        "(want) => (document.querySelector('.ladder .algo-btn') || {})"
+        ".textContent === want", arg=want, timeout=WAIT)
+
+
+def _algo_off(page):
+    publisher = page.paths['publisher']
+    publisher.algo = 'NONE'
+    publisher.algo_block = None
+    publisher.publish()
+    page.wait_for_function(
+        "() => (document.querySelector('.ladder .algo-btn') || {})"
+        ".textContent === 'ALGO OFF'", timeout=WAIT)
+
+
+def _click_a_bid(page):
+    page.evaluate("() => document.querySelector("
+                  "'.ladder .grid tbody td.bid').click()")
+
+
+def test_a_LIVE_ladder_is_locked_and_says_so(page):
+    """Algo or Manual, never both — on the SCREEN, not only in the
+    engine. While LIVE the ways in are off (and a click on the grid
+    sends nothing), the ladder says why, and the ways out stay."""
+    open_ladder(page)
+    try:
+        _ladder_with_algo(page, 'LIVE')
+        page.wait_for_selector('.ladder .algo-lock:not([hidden])',
+                               timeout=WAIT)
+        assert 'manual orders are off' in page.text_content(
+            '.ladder .algo-lock')
+        # A strip ABOVE the ladder, never in place of it: the prices are
+        # still the thing the trader is watching.
+        grid = page.locator('.ladder .grid').bounding_box()
+        assert grid['width'] > 200 and grid['height'] > 200, grid
+        lock = page.locator('.ladder .algo-lock').bounding_box()
+        assert lock['y'] + lock['height'] <= grid['y'] + 1
+        assert page.is_disabled('.ladder .buy-touch')
+        assert page.is_disabled('.ladder .sell-touch')
+        assert page.is_disabled('.ladder .keypad .qty')
+        # A close is never withheld.
+        assert page.is_enabled('.ladder .flatten')
+        assert page.is_enabled('.ladder .close-limit-go')
+
+        page.evaluate(SPY_ON_COMMANDS)
+        page.evaluate("() => { document.getElementById('toasts')"
+                      ".innerHTML = ''; }")
+        _click_a_bid(page)
+        page.wait_for_selector('.toast:has-text("manual orders are off")',
+                               timeout=WAIT)
+        assert not page.evaluate(
+            "() => window.__commands.some(c => c.kind === 'click')")
+    finally:
+        page.evaluate('() => { window.fetch = window.__realFetch || '
+                      'window.fetch; }')
+        _algo_off(page)
+
+
+def test_the_CONTROL_a_dry_run_ladder_still_trades_by_hand(page):
+    open_ladder(page)
+    try:
+        _ladder_with_algo(page, 'DRY_RUN')
+        assert page.locator('.ladder .algo-lock[hidden]').count() == 1
+        assert page.is_enabled('.ladder .buy-touch')
+        assert page.is_enabled('.ladder .keypad .qty')
+        page.evaluate(SPY_ON_COMMANDS)
+        page.evaluate("() => { window.MT5Trader.state.snapshot"
+                      ".confirm_market_clicks = false; }")
+        _click_a_bid(page)
+        page.wait_for_function(
+            "() => window.__commands.some(c => c.kind === 'click')",
+            timeout=WAIT)
+    finally:
+        page.evaluate('() => { window.fetch = window.__realFetch || '
+                      'window.fetch; }')
+        _algo_off(page)
+
+
+#: Capture every engine command the page sends, answering each as the
+#: engine would — so a test can read exactly what was asked for.
+SPY_ON_COMMANDS = """(answer) => {
+    window.__realFetch = window.__realFetch || window.fetch;
+    window.__commands = [];
+    window.__answer = answer || {ok: true};
+    window.fetch = function (url, options) {
+        const u = String(url);
+        const json = (body) => Promise.resolve(new Response(
+            JSON.stringify(body),
+            {status: 200, headers: {'Content-Type': 'application/json'}}));
+        if (u.indexOf('/api/command') >= 0 && options) {
+            window.__commands.push(JSON.parse(options.body));
+            return json({ok: true, id: 'c' + window.__commands.length});
+        }
+        if (u.indexOf('/api/result/') >= 0) {
+            return json({ok: true, data: window.__answer});
+        }
+        if (u.indexOf('/api/pairs/') >= 0 && options &&
+            options.method === 'POST') {
+            return json({ok: true, notes: []});
+        }
+        return window.__realFetch(url, options);
+    };
+}"""
+
+
+def algo_commands(page):
+    return [c for c in page.evaluate('() => window.__commands')
+            if c['kind'] == 'set_algo']
+
+
+def test_going_LIVE_asks_first_and_sends_nothing_until_confirmed(page):
+    open_ladder(page)
+    page.evaluate(SPY_ON_COMMANDS)
+    try:
+        page.click('.ladder .ladder-cog')
+        page.wait_for_selector('.ladder .ls-algo', timeout=WAIT)
+        page.select_option('.ladder .ls-algo', 'ALGO_LIVE')
+        page.click('.ladder .ls-save')
+        page.wait_for_selector('#modal:not(.hidden)', timeout=WAIT)
+        assert 'LIVE' in page.text_content('#modal-title')
+        assert 'REAL orders' in page.text_content('#modal-body')
+        assert algo_commands(page) == []            # nothing sent yet
+
+        page.click('#modal-confirm')
+        page.wait_for_function(
+            "() => window.__commands.some(c => c.kind === 'set_algo')",
+            timeout=WAIT)
+        [command] = algo_commands(page)
+        assert command['payload']['mode'] == 'LIVE'
+        assert command['payload']['confirmed'] is True
+    finally:
+        page.evaluate('() => { window.fetch = window.__realFetch; }')
+
+
+def test_a_dry_run_is_not_asked_about(page):
+    """The control: the Algo in dry run sends nothing, so it asks
+    nothing."""
+    open_ladder(page)
+    page.evaluate(SPY_ON_COMMANDS)
+    try:
+        page.click('.ladder .ladder-cog')
+        page.wait_for_selector('.ladder .ls-algo', timeout=WAIT)
+        page.select_option('.ladder .ls-algo', 'ALGO')
+        page.click('.ladder .ls-save')
+        page.wait_for_function(
+            "() => window.__commands.some(c => c.kind === 'set_algo')",
+            timeout=WAIT)
+        [command] = algo_commands(page)
+        assert command['payload']['mode'] == 'DRY_RUN'
+        assert page.locator('#modal:not(.hidden)').count() == 0
+    finally:
+        page.evaluate('() => { window.fetch = window.__realFetch; }')
+
+
+def test_leaving_LIVE_with_a_position_offers_close_or_hand_over(page):
+    open_ladder(page)
+    page.evaluate(SPY_ON_COMMANDS, {
+        'ok': False, 'choose': ['close', 'manual'],
+        'reason': 'the Algo holds 1 position(s) on XAUUSD_|GC1226'})
+    try:
+        page.evaluate(
+            "() => window.MT5Trader.setAlgo('XAUUSD_|GC1226', 'NONE')")
+        page.wait_for_selector('#modal:not(.hidden)', timeout=WAIT)
+        assert page.is_visible('#modal-alt')
+        assert 'Hand it to manual' in page.text_content('#modal-alt')
+        page.evaluate("() => { window.__answer = {ok: true}; }")
+        page.click('#modal-alt')
+        page.wait_for_function(
+            "() => window.__commands.filter(c => c.kind === 'set_algo')"
+            ".length === 2", timeout=WAIT)
+        assert algo_commands(page)[-1]['payload']['off_action'] == 'manual'
+        # The second answer is gone again for every other question.
+        assert not page.is_visible('#modal-alt')
+    finally:
+        page.evaluate('() => { window.fetch = window.__realFetch; }')
+
+
+def test_the_backtest_button_runs_it_on_the_engine_and_shows_both_runs(page):
+    """What these settings would have done on MT5's history — and,
+    beside it, without the trend protections. It asks the ENGINE, which
+    holds the history and the costs, and it sends no order."""
+    open_ladder(page)
+    answer = {'ok': True, 'summary': {
+                  'trades': 3, 'wins': 2, 'losses': 1, 'net': 4.5,
+                  'max_drawdown': -1.2, 'candles': 480,
+                  'from': 1790000000, 'to': 1790432000},
+              'without_protections': {'trades': 9, 'wins': 3, 'losses': 6,
+                                      'net': -12.25, 'max_drawdown': -15.0},
+              'held': {'trend: the middle ROSE #σ in the last # min — no '
+                       'H to L against it': 14},
+              'trades': [{'side': 'SELL', 'opened_at': 1790100000,
+                          'entry_z': 1.48, 'reason': 'PROFIT_TARGET',
+                          'pnl': 2.5}],
+              'caveats': ['one look per candle']}
+    try:
+        _ladder_with_algo(page, 'DRY_RUN')
+        page.wait_for_selector('.window.algowin .aw-bt-run', timeout=WAIT)
+        page.evaluate(SPY_ON_COMMANDS, answer)
+        page.click('.window.algowin .aw-bt-run')
+        page.wait_for_function(
+            "() => (document.querySelector('.window.algowin .aw-bt-out') "
+            "|| {textContent: ''}).textContent.indexOf('These settings') >= 0",
+            timeout=WAIT)
+        text = page.text_content('.window.algowin .aw-bt-out')
+        assert '3 trade(s)' in text and '9 trade(s)' in text
+        assert 'Without re-entry and the trend filter' in text
+        assert 'ROSE' in text and 'H to L' in text
+        kinds = page.evaluate("() => window.__commands.map(c => c.kind)")
+        assert kinds == ['algo_backtest']
+        assert page.evaluate(
+            "() => window.__commands[0].payload.days") == 5
+    finally:
+        page.evaluate('() => { window.fetch = window.__realFetch || '
+                      'window.fetch; }')
+        _algo_off(page)
+
+
+def test_a_held_working_order_is_the_mode_not_a_fault(page):
+    """A working order is HELD by the desk and both legs cross when the
+    spread reaches it, so nothing is at the broker - by design. It must
+    not light up as an order that failed to place."""
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    level = page.evaluate(
+        """() => window.MT5Trader.state.snapshot
+             .pairs['XAUUSD_|GC1226'].rows[5].level""")
+    publisher.orders = [{'order_id': 'O1', 'level': level, 'side': 'SELL',
+                         'quantity': 1, 'filled_quantity': 0,
+                         'state': 'WORKING', 'time_in_force': 'DAY'}]
+    publisher.quotes = [{'pair_key': 'XAUUSD_|GC1226', 'side': 'SELL',
+                         'level': level, 'leg': 'BOTH', 'ticket': None,
+                         'held': True, 'intent': 'OPEN', 'reason': None,
+                         'orders': ['O1']}]
+    publisher.working_sells = 1
+    publisher.broker_pendings = 0
+    publisher.pair_extra = {'working_orders': 'TRIGGER', 'held_entries': 1}
+    publisher.publish()
+    page.wait_for_function(
+        """() => (document.querySelector('.ladder .quoting-note') || {})
+             .textContent && document.querySelector('.ladder .quoting-note')
+             .textContent.indexOf('held here') >= 0""", timeout=WAIT)
+    assert page.locator('.ladder .quoting-note.held').count() == 0
+    assert page.locator('.ladder .cnt-w.mismatch').count() == 0
+    assert page.locator('.ladder td.work.held').count() == 0
+
+    # THE CONTROL: a held order something IS holding (a stale price)
+    # says so, in its own words.
+    publisher.quotes[0]['reason'] = ('leg A stale 30s - holding the '
+                                     'order, nothing sent')
+    publisher.publish()
+    page.wait_for_selector('.ladder .quoting-note.held', timeout=WAIT)
+    note = page.text_content('.ladder .quoting-note')
+    assert 'ORDER HELD' in note and 'stale' in note
+
+    publisher.orders = None
+    publisher.quotes = None
+    publisher.working_sells = 0
+    publisher.broker_pendings = None
+    publisher.pair_extra = {}
+    publisher.publish()
+
+
+def test_each_end_of_the_re_entry_window_carries_its_own_price(page):
+    """'short back at +2.00 (59.08) to +1.00 (59.04)': the bracketed
+    price sat after the far end and read as ITS price; it was the near
+    end's. Each z now has its own, both sides."""
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    publisher.algo = 'ALGO'
+    block = _algo_block(state='WATCHING', signal=None)
+    block['params'].update(reentry_on=True, reentry_back=0.5,
+                           reentry_window_pct=50)
+    publisher.algo_block = block
+    try:
+        publisher.publish()
+        page.wait_for_function(
+            "() => (document.querySelector('.window.algowin .aw-signal')"
+            " || {textContent: ''}).textContent.includes('back at')",
+            timeout=WAIT)
+        text = page.text_content('.window.algowin .aw-signal')
+        assert '+2.00 (59.08) to +1.00 (59.04)' in text, text
+        assert '−2.00 (58.92) to −1.00 (58.96)' in text, text
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def test_each_side_can_have_its_own_exits_and_blank_is_the_ladders(page):
+    """H to L and L to H each get an optional stop / target of their
+    own. A typed value is sent under the side's key; a blank one is not
+    sent at all - the ladder's own value stands, never a zero."""
+    open_ladder(page)
+    page.click('.ladder .ladder-cog')
+    page.wait_for_selector('.ladder .ladder-settings .ls-az-atr-stop-sell',
+                           timeout=WAIT)
+    page.locator('.ladder .ladder-settings .ls-az-atr-stop-sell') \
+        .scroll_into_view_if_needed()
+    if os.environ.get('SIDE_SHOT'):
+        page.screenshot(path=os.environ['SIDE_SHOT'])
+    page.evaluate(SPY_ON_PAIR_SAVE)
+    page.select_option('.ladder .ladder-settings .ls-az-stop-mode-sell',
+                       'ATR')
+    page.fill('.ladder .ladder-settings .ls-az-atr-stop-sell', '3')
+    page.fill('.ladder .ladder-settings .ls-az-tp-buy', '6')
+    page.click('.ladder .ladder-settings .ls-save')
+    page.wait_for_function("() => window.__sent !== null", timeout=WAIT)
+    params = page.evaluate('() => window.__sent')['algo_params']
+    page.evaluate('() => { window.fetch = window.__realFetch; }')
+    assert params['stop_mode_sell'] == 'ATR'
+    assert params['atr_stop_mult_sell'] == 3
+    assert params['tp_pct_buy'] == 6
+    # The CONTROL: the boxes left blank are not sent.
+    for key in ('stop_mode_buy', 'atr_stop_mult_buy', 'tp_pct_sell',
+                'stop_loss_pct_sell', 'target_mode_sell'):
+        assert key not in params, key
+    page.evaluate("() => document.getElementById('toasts').innerHTML = ''")
+    page.wait_for_selector('.ladder .grid tbody tr')
+
+
+def test_a_signals_alert_is_said_once_and_stays_until_dismissed(page):
+    """SIGNALS mode: the trade is the trader's to make, so the alert
+    stays on screen. Said once by its id - the next poll carrying the
+    same alert says nothing more. The control: a NEW id is said."""
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    publisher.algo = 'ALGO'
+
+    def alert(alert_id):
+        return {'id': alert_id, 'seq': 1, 'kind': 'ENTRY', 'side': 'SELL',
+                'reason': None, 'at': time.time(),
+                'text': 'H to L — SELL 1 @ 59.1000 (z +2.61) ' + alert_id}
+    publisher.algo_block = _algo_block(signal_alert=alert('A1'))
+    try:
+        publisher.publish()
+        page.wait_for_selector('#toasts .toast.signal', timeout=WAIT)
+        page.wait_for_timeout(600)                 # three more polls
+        toasts = page.locator('#toasts .toast.signal')
+        assert toasts.count() == 1
+        assert 'H to L — SELL 1 @ 59.1000' in toasts.first.text_content()
+        toasts.first.click()                       # dismissed
+        page.wait_for_timeout(600)
+        assert page.locator('#toasts .toast.signal').count() == 0
+        publisher.algo_block = _algo_block(signal_alert=alert('A2'))
+        publisher.publish()
+        page.wait_for_selector('#toasts .toast.signal', timeout=WAIT)
+        assert 'A2' in page.text_content('#toasts .toast.signal')
+        page.locator('#toasts .toast.signal').first.click()
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def test_your_position_is_marked_on_the_ladder_and_named_yours(page):
+    """A manual position the Algo watches: YOUR SHORT in its window, and
+    its entry / target / stop tagged on the ladder's own prices."""
+    open_ladder(page)
+    publisher = page.paths['publisher']
+    levels = page.evaluate(
+        """() => window.MT5Trader.state.snapshot
+             .pairs['XAUUSD_|GC1226'].rows.map(r => r.level)""")
+    publisher.algo = 'ALGO'
+    held = {'position_id': 'P1', 'side': 'SELL', 'quantity': 1,
+            'source': 'MANUAL', 'entry_spread': levels[4],
+            'closing_spread': levels[5], 'break_even': None,
+            'tp': levels[7], 'sl': levels[2], 'exit': None}
+    publisher.algo_block = _algo_block(state='IN_POSITION', signal=None,
+                                       positions=[held])
+    try:
+        publisher.publish()
+        page.wait_for_selector('.ladder .lvl-tag.tp', timeout=WAIT)
+        assert page.locator('.ladder .lvl-tag.entry').count() == 1
+        assert page.locator('.ladder .lvl-tag.sl').count() == 1
+        # Unmeasured is not marked: no break-even, no BE tag.
+        assert page.locator('.ladder .lvl-tag.be').count() == 0
+        page.wait_for_function(
+            "() => (document.querySelector('.window.algowin .aw-pos')"
+            " || {textContent: ''}).textContent.includes('YOUR SHORT')",
+            timeout=WAIT)
+        # The control: the Algo's own position is not called yours.
+        held['source'] = 'ALGO'
+        publisher.publish()
+        page.wait_for_function(
+            "() => (document.querySelector('.window.algowin .aw-pos')"
+            " || {textContent: ''}).textContent.indexOf('SHORT') === 0",
+            timeout=WAIT)
+    finally:
+        publisher.algo = 'NONE'
+        publisher.algo_block = None
+        publisher.publish()
+
+
+def test_a_derive_that_found_nothing_says_what_held_it_back(page):
+    """'derived 0 signal(s)' on its own reads as a broken replay.
+
+    This is the whole reason the engine now returns the reasons: the
+    note has to say that the Algo LOOKED and declined, and why, or the
+    screen cannot tell a filter doing its job from a derive that never
+    ran.
+    """
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .an-derive', timeout=WAIT)
+    page.evaluate("""() => {
+        // Stand in for the engine: the command log and its result.
+        window.__realFetch = window.fetch;
+        const json = (body) => Promise.resolve(new Response(
+            JSON.stringify(body),
+            {status: 200, headers: {'Content-Type': 'application/json'}}));
+        window.fetch = function (url, options) {
+            const at = String(url);
+            if (at.indexOf('/api/command') >= 0) {
+                return json({ok: true, id: 'cmd1'});
+            }
+            if (at.indexOf('/api/result/') >= 0) {
+                return json({ok: true, data: {
+                    ok: true, days: 30, written: 0,
+                    pairs: {'XAUUSD_|GC1226': {
+                        ok: true, derived: 0, replaced: 0,
+                        held: {'edge filter': 400, 'trend': 12}}},
+                    held: {'edge filter': 400, 'trend': 12}}});
+            }
+            return window.__realFetch(url, options);
+        };
+    }""")
+    page.click('.monitor .an-derive')
+    page.wait_for_selector('.monitor .an-derive-out', timeout=WAIT)
+    for _ in range(40):
+        note = page.text_content('.monitor .an-derive-out')
+        if 'held back' in note:
+            break
+        page.wait_for_timeout(100)
+    note = page.text_content('.monitor .an-derive-out')
+    assert 'derived 0 signal(s) over 30 days' in note
+    # The counts, biggest first, and the total so the size of it reads.
+    assert 'held back 412 time(s)' in note
+    # The count is in brackets, not run on after the reason: a reason
+    # that ends in a word made "under the nx required 1" of it.
+    assert 'edge filter (400)' in note and 'trend (12)' in note
+    assert note.index('edge filter') < note.index('trend')
+    page.evaluate('() => { window.fetch = window.__realFetch; }')
+
+
+def test_the_journal_puts_the_levels_in_columns(page):
+    """'Algo: stop loss' on its own cannot tell a stop that was hit
+    from a stop that was set in the wrong place \u2014 and a prose line
+    under the row cannot be compared with the row above it."""
+    page.errors.clear()      # earlier tests raise on purpose
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis'},
+          summary: {count: 1, closed: 1, net_pnl: -205.0, win_rate: 0.0,
+                    wins: 0, losses: 1},
+          drawdown: {}, calibration: {}, shadow: {}, excursion: [],
+          signals: [],
+          journal: [{position_id: 'P1', pair_key: 'A|B', side: 'SELL',
+            closed_at: 1762600000, source: 'ALGO', quantity: 1.0,
+            exit_reason: 'Algo: stop loss',
+            exit: {break_even: 71.20, tp: 70.55, sl: 71.40,
+                   on_level: 'sl',
+                   sized_by: '2% of margin (4,720.00/spread)',
+                   level_money: -205.0, gap: 0.06, gap_word: 'past',
+                   note: null},
+            entry_spread: 71.0, exit_spread: 71.46, held_sec: 900,
+            entry_z: 2.6, exit_z: 3.1,
+            leg_a: {side: 'BUY', entry: 101.118},
+            leg_b: {side: 'SELL', entry: 115.554},
+            pnl: -205.0, cum_pnl: -205.0}]};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis table', timeout=WAIT)
+    text = page.text_content('.monitor .analysis')
+    for heading in ('Break-even', 'Target', 'Stop', 'vs level'):
+        assert heading in text, heading
+    assert '71.2000' in text and '70.5500' in text and '71.4000' in text
+    assert '0.0600' in text and 'past' in text
+    # The one that fired is marked, and only that one.
+    assert page.locator('.monitor .analysis td.on-level').count() == 1
+    marked = page.text_content('.monitor .analysis td.on-level')
+    assert '71.4000' in marked
+    # The setting that put it there is a tooltip, not a column of prose.
+    assert '2% of margin' in page.get_attribute(
+        '.monitor .analysis td.on-level', 'title')
+    # And no prose line survives under the row.
+    assert page.locator('.monitor .analysis tr.detail').count() == 0
+    assert page.errors == []
+
+
+def test_a_level_nobody_recorded_is_a_dash_not_a_number(page):
+    """CONTROL. Unmeasured is not zero and is not today's settings."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis'},
+          summary: {}, drawdown: {}, calibration: {}, shadow: {},
+          excursion: [], signals: [],
+          journal: [{position_id: 'P9', pair_key: 'A|B', side: 'SELL',
+            closed_at: 1762600000, source: 'ALGO', quantity: 1.0,
+            exit_reason: 'Algo: stop loss',
+            exit: {break_even: null, tp: null, sl: null, on_level: 'sl',
+                   sized_by: null, level_money: null, gap: null,
+                   gap_word: null,
+                   note: 'the level it was measured against was not ' +
+                         'recorded \u2014 kept from this version on'},
+            entry_spread: 71.0, exit_spread: 71.46, held_sec: 900,
+            leg_a: {side: 'BUY', entry: 101.118},
+            leg_b: {side: 'SELL', entry: 115.554},
+            pnl: -205.0, cum_pnl: -205.0}]};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis table', timeout=WAIT)
+    assert page.locator('.monitor .analysis td.on-level').count() == 0
+    titles = page.locator('.monitor .analysis td.hint[title]')
+    assert titles.count() >= 3          # all three levels say why
+    assert 'not recorded' in titles.first.get_attribute('title')
+    assert page.errors == []
+
+
+def test_the_signal_journal_reads_like_the_trade_journal(page):
+    """The same columns in the same order, so the two halves of the
+    page can be read against each other \u2014 and the signals are
+    recorded off the live book, not simulated."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis'},
+          summary: {}, drawdown: {}, calibration: {}, shadow: {},
+          excursion: [], journal: [],
+          signal_tally: {armed: 2, blocked: 1, entered: 1, no_entry: 0,
+                         tp: 0, sl: 1, win_rate: 0.0, net_pnl: -205.0,
+                         live: 2, replayed: 0, priced: 1, settled: 1},
+          signals: [
+            {pair_key: 'A|B', side: 'SELL', source: 'LIVE', state: 'CLOSED',
+             outcome: 'SL', armed_at: 1762600000, armed_z: 2.61,
+             closed_z: 3.12, entry: 71.0, exit_spread: 71.46,
+             break_even: 71.20, tp: 70.55, sl: 71.40,
+             quantity: 1.0, held_min: 15.0,
+             leg_a_side: 'BUY', leg_a_entry: 101.118,
+             leg_b_side: 'SELL', leg_b_entry: 115.554,
+             net_pnl: -205.0, cum_pnl: -205.0,
+             why: 'never came back to the mean'},
+            {pair_key: 'A|B', side: 'SELL', source: 'LIVE', state: 'CLOSED',
+             outcome: 'BLOCKED', armed_at: 1762500000, armed_z: 2.55,
+             break_even: null, tp: null, sl: null,
+             net_pnl: null, cum_pnl: -205.0,
+             why: 'edge filter: capture is 0.02x the round trip \u00b7 ' +
+               'edge 0.02x of 1.50x'}]};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis table', timeout=WAIT)
+    text = page.text_content('.monitor .analysis')
+    for heading in ('Size', 'Leg A in', 'Leg B in', 'Running', 'Why',
+                    'Break-even'):
+        assert heading in text, heading
+    assert 'BUY 101.118' in text and 'SELL 115.554' in text
+    assert '2.61' in text and '3.12' in text
+    # The levels as columns, with the one that fired marked.
+    assert '71.2000' in text and '70.5500' in text and '71.4000' in text
+    assert page.locator('.monitor .analysis td.on-level').count() == 1
+    # The refusal keeps its words, in the WHY column.
+    assert 'edge 0.02x of 1.50x' in text
+    # Recorded, not simulated: the word that was wrong is gone.
+    assert 'hypothetical' not in text.lower()
+    assert 'recorded off the live book' in text.lower()
+    assert page.errors == []
+
+
+def test_the_chart_opens_and_closes_from_the_ladder(page):
+    """Arrow-statarb's two charts for one ladder - the Algo's z between
+    its entry lines, and the spread - opened by the trader and closed by
+    the trader, from the ladder's own title bar."""
+    from mt5trader import chart
+    key = 'XAUUSD_|GC1226'
+    tape = chart.SpreadTape()
+    start = time.time() - 600
+    for i in range(300):
+        tape.observe(key, start + i * 2,
+                     {'mid_spread': 59.1 + 0.1 * math.sin(i / 20.0)},
+                     {'z_mid': 3.0 * math.sin(i / 20.0), 'mean': 59.1,
+                      'sigma': 0.1, 'ready': True, 'count': 20,
+                      'needed': 20},
+                     {'entry_z': 2.5, 'stop_z': 4.0, 'stop_z_on': True})
+    tape.write(chart.chart_path(page.paths['status']), time.time(),
+               force=True)
+    page.errors.clear()
+    button = page.locator('.ladder[data-pair="%s"] .chart-btn' % key)
+    assert page.locator('.window.chartwin').count() == 0
+    button.click()
+    page.wait_for_selector('.window.chartwin .cw-z svg', timeout=WAIT)
+    win = page.locator('.window.chartwin')
+    assert 'Gold basis' in win.locator('.cw-pair').text_content()
+    # Candles, both entry lines and both stop lines - 2 s points over
+    # 10 minutes at the 1-hour range's 1-minute candles.
+    assert win.locator('.cw-z .cw-candle').count() >= 10
+    assert win.locator('.cw-z .cw-candle.up').count() >= 1
+    assert win.locator('.cw-z .cw-candle.down').count() >= 1
+    assert '1m candles' in win.locator('.cw-size').text_content()
+    assert win.locator('.cw-z .cw-entry-up').count() == 1
+    assert win.locator('.cw-z .cw-entry-down').count() == 1
+    assert win.locator('.cw-z .cw-stop').count() == 2
+    assert win.locator('.cw-spread .cw-candle').count() >= 10
+    # A shorter range draws finer candles.
+    win.locator('.cw-minutes').select_option('15')
+    page.wait_for_function(
+        "document.querySelector('.chartwin .cw-size').textContent"
+        ".indexOf('20s') === 0", timeout=WAIT)
+    assert 'Min:' in win.text_content() and 'Max:' in win.text_content()
+    assert 'on' in button.get_attribute('class')
+    # Closed by the trader: the same button...
+    button.click()
+    page.wait_for_timeout(200)
+    assert page.locator('.window.chartwin').count() == 0
+    assert 'on' not in button.get_attribute('class').split()
+    # ...or the window's own close.
+    button.click()
+    page.wait_for_selector('.window.chartwin', timeout=WAIT)
+    page.click('.window.chartwin .close')
+    page.wait_for_timeout(200)
+    assert page.locator('.window.chartwin').count() == 0
+    assert page.errors == []
+
+
+def test_the_signal_journal_names_the_accounts_the_edge_and_hides_the_unconfirmed(
+        page):
+    """Each row says which account at which broker each leg was on and
+    what the edge filter read; a stretch armed and let go without ever
+    confirming is not a signal, so it is not listed until asked for."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.showUnconfirmed = false;
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis'},
+          summary: {}, drawdown: {}, calibration: {}, shadow: {},
+          excursion: [], journal: [],
+          signal_tally: {armed: 2, blocked: 1, entered: 0, no_entry: 1},
+          signals: [
+            {pair_key: 'A|B', side: 'SELL', source: 'LIVE', state: 'CLOSED',
+             outcome: 'BLOCKED', armed_at: 1762500000, armed_z: 2.55,
+             leg_a_account: 'CFI', leg_a_broker: 'CFI Financial Group',
+             leg_b_account: 'FxPro', leg_b_broker: 'FxPro Financial',
+             edge_ratio: 0.42, edge_required: 1.5, edge_on: true,
+             net_pnl: null, cum_pnl: null, why: 'edge filter'},
+            {pair_key: 'A|B', side: 'BUY', source: 'LIVE', state: 'CLOSED',
+             outcome: 'NO_ENTRY', armed_at: 1762400000, armed_z: -7.73,
+             edge_ratio: 2.1, edge_required: 1.5, edge_on: false,
+             net_pnl: null, cum_pnl: null, why: 'came back'}]};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis table', timeout=WAIT)
+    text = page.text_content('.monitor .analysis')
+    assert 'A: CFI · CFI Financial Group' in text
+    assert 'B: FxPro · FxPro Financial' in text
+    assert '0.42× / 1.50×' in text
+    # The unconfirmed stretch is counted, not listed...
+    assert '-7.73' not in text
+    assert '1 stretch armed and let go without confirming' in text
+    # ...and one click lists it, with its edge and the filter said OFF.
+    page.click('.monitor .an-toggle-unconfirmed')
+    text = page.text_content('.monitor .analysis')
+    assert '-7.73' in text
+    assert '2.10× / 1.50× (off)' in text
+    page.click('.monitor .an-toggle-unconfirmed')
+    assert '-7.73' not in page.text_content('.monitor .analysis')
+    assert page.errors == []
+
+
+def test_the_monitor_takes_the_room_there_is(page):
+    """A flat 560px default left the bottom third of the screen as bare
+    desktop under a tab that is several screens long."""
+    page.evaluate("""() => {
+        window.localStorage.removeItem('mt5trader.windows.v1');
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis', timeout=WAIT)
+    room = page.evaluate("""() => {
+        const w = document.querySelector('.window.monitor');
+        const d = document.getElementById('desktop');
+        return d.getBoundingClientRect().bottom -
+               w.getBoundingClientRect().bottom;
+    }""")
+    # Within one window's furniture of the foot of the desktop, not a
+    # third of the screen away.
+    assert 0 <= room < 120, room
+
+
+def test_the_z_trigger_count_is_on_the_page_with_its_threshold(page):
+    """'How many times did the z trigger' — split by side, with the
+    band it was counted against named rather than left to be guessed."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.analysis = {ok: true, names: {'A|B': 'Oil basis'},
+          summary: {}, drawdown: {}, calibration: {}, shadow: {},
+          excursion: [], journal: [], signals: [],
+          signal_tally: {armed: 9, triggered: 9, triggered_up: 6,
+                         triggered_down: 3, threshold_z: 2.5,
+                         peak_z: 3.41, trough_z: -2.88,
+                         blocked: 2, entered: 5, no_entry: 2, tp: 3, sl: 2,
+                         win_rate: 60.0, net_pnl: 410.0, live: 9,
+                         replayed: 0, priced: 5, settled: 5}};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis .an-tiles', timeout=WAIT)
+    text = page.text_content('.monitor .analysis')
+    assert 'z triggered ±2.50σ' in text
+    assert '↑ above' in text and '↓ below' in text
+    assert 'Furthest z' in text and '3.41σ' in text
+    # The two sides add up to the total, on the screen as in the engine.
+    assert '9' in text and '6' in text and '3' in text
+    assert page.errors == []
+
+
+def test_two_ladders_that_disagree_name_no_band_on_the_tile(page):
+    """CONTROL. Printing either threshold would be wrong on half the
+    rows, so the tile names none."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        s.analysis = {ok: true, names: {}, summary: {}, drawdown: {},
+          calibration: {}, shadow: {}, excursion: [], journal: [],
+          signals: [],
+          signal_tally: {armed: 4, triggered: 4, triggered_up: 2,
+                         triggered_down: 2, threshold_z: null,
+                         peak_z: null, trough_z: null, blocked: 0,
+                         entered: 0, no_entry: 0, tp: 0, sl: 0,
+                         win_rate: null, net_pnl: null, live: 4,
+                         replayed: 0, priced: 0, settled: 0}};
+        s.analysisAt = Date.now();
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .analysis .an-tiles', timeout=WAIT)
+    text = page.text_content('.monitor .analysis')
+    assert 'z triggered' in text and 'σ' not in text.split('Blocked')[0]
+    assert page.errors == []
+
+
+def test_a_derive_that_found_nothing_reads_as_a_sentence(page):
+    """The engine groups held-back reasons with their NUMBERS taken
+    out, writing '#' where they were. On a live desk that reached the
+    screen as 'edge filter: capture #x the cost, under the #x required
+    1' — which reads as a fault, and runs the count straight on
+    after the word 'required'."""
+    page.errors.clear()
+    page.evaluate("""() => {
+        const s = window.MT5Trader.state;
+        s.open = ['monitor:'];
+        s.monitorTab = 'analysis';
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_selector('.monitor .an-derive', timeout=WAIT)
+    page.evaluate("""() => {
+        // An earlier test in this module leaves its own note behind,
+        // and it also says 'held back'.
+        window.MT5Trader.state.deriveNote = null;
+        window.MT5Trader.state.deriving = false;
+        window.MT5Trader.render();
+        window.__realFetch = window.fetch;
+        const json = (b) => Promise.resolve(new Response(JSON.stringify(b),
+            {status: 200, headers: {'Content-Type': 'application/json'}}));
+        window.fetch = function (url, options) {
+            const at = String(url);
+            if (at.indexOf('/api/command') >= 0) {
+                return json({ok: true, id: 'cmd1'});
+            }
+            if (at.indexOf('/api/result/') >= 0) {
+                return json({ok: true, data: {
+                    ok: true, days: 30, written: 0,
+                    pairs: {'A|B': {ok: true, derived: 0, replaced: 0}},
+                    held: {'edge filter: capture #x the cost, under the #x required': 1}}});
+            }
+            return window.__realFetch(url, options);
+        };
+    }""")
+    page.click('.monitor .an-derive')
+    for _ in range(40):
+        note = page.text_content('.monitor .an-derive-out')
+        if 'held back' in note:
+            break
+        page.wait_for_timeout(100)
+    note = page.text_content('.monitor .an-derive-out')
+    assert 'capture nx the cost, under the nx required (1)' in note
+    assert '#' not in note
+    assert 'required 1' not in note
+    page.evaluate('() => { window.fetch = window.__realFetch; }')
+    assert page.errors == []

@@ -30,7 +30,7 @@ Three rules that cost money in the system this is ported from:
 import logging
 import time
 
-from .models import MAGIC_NUMBER, OrderSide
+from .models import as_ticket, MAGIC_NUMBER, OrderSide
 
 #: The comment we write on every order this system places. Positions
 #: carrying it are OURS by definition - the broker is quoting our own
@@ -331,7 +331,7 @@ class Reconciler:
         key = (account, ticket)
         entry_side = OrderSide(position['side'])
         before = leg.tick(position['symbol']) or {}
-        result = leg.close_ticket(position['symbol'], int(ticket),
+        result = leg.close_ticket(position['symbol'], as_ticket(ticket),
                                   position['volume'], entry_side.value,
                                   comment='RECONCILE')
         if not result.get('ok'):
@@ -382,7 +382,8 @@ class Reconciler:
             "reconcile: closed ORPHAN %s ticket %s on '%s' — %s %s lots, "
             "P&L %s", position['symbol'], ticket, account, position['side'],
             position['volume'],
-            f"${pnl:,.2f}" if pnl is not None else 'unmeasured')
+            f"{pnl:,.2f} in the leg's price currency" if pnl is not None
+            else 'unmeasured')
         return entry
 
     def _contract_size(self, account, symbol):

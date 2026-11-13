@@ -54,6 +54,7 @@ def rest_and_fill_behind_our_back(coordinator, pair, legs):
     return ticket
 
 
+@pytest.mark.quote
 def test_the_notice_clears_the_moment_the_position_is_in_the_book(
         engine, pair, legs):
     """THE BUG. The warning outlived the thing it was warning about."""
@@ -126,6 +127,7 @@ def test_nothing_is_listed_before_recovery_has_read_the_book(engine, pair,
     assert len(legs['acct_b'].broker.open_positions()) == 1
 
 
+@pytest.mark.quote
 def test_CLOSE_IT_is_refused_for_a_leg_the_book_holds(engine, pair, legs):
     """The dangerous half. The screen offered exactly one button for
     this position, and pressing it would have closed a live hedged leg

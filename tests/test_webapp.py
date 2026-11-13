@@ -50,7 +50,16 @@ def write_status(paths, **overrides):
     snapshot.update(overrides)
     with open(paths['status'], 'w', encoding='utf-8') as f:
         json.dump(snapshot, f)
+    # The app re-reads the file when (mtime, size) changes. Windows'
+    # clock is coarse: two writes in a row of the same size kept one
+    # mtime, and the second status was never read. A stamp of its own.
+    global _LAST_STAMP
+    _LAST_STAMP = max(time.time_ns(), _LAST_STAMP + 10_000_000)
+    os.utime(paths['status'], ns=(_LAST_STAMP, _LAST_STAMP))
     return snapshot
+
+
+_LAST_STAMP = 0
 
 
 def test_a_dead_coordinator_is_never_mistaken_for_a_quiet_market(client,

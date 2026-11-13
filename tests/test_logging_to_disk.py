@@ -126,9 +126,13 @@ def test_the_files_are_rotated_rather_than_growing_for_ever(tmp_path):
                               max_bytes=2000, backups=2)
         for i in range(400):
             logging.critical('a reconciler decision number %d', i)
-        files = sorted(p.name for p in Path(path).parent.iterdir())
-        assert len(files) <= 3, files          # the file plus its backups
-        assert 'coordinator.log' in files
+        names = [p.name for p in Path(path).parent.iterdir()]
+        # Each file plus its backups: the full log and the problems log.
+        for stem in ('coordinator.log', 'coordinator.problems.log'):
+            files = sorted(n for n in names if n.startswith(stem)
+                           and not n[len(stem):].lstrip('.')[:1].isalpha())
+            assert len(files) <= 3, files
+            assert stem in files
     finally:
         _clean()
 
@@ -160,3 +164,45 @@ def test_control_the_console_keeps_everything_it_had():
         text = (ROOT / name).read_text(encoding='utf-8')
         assert "FileHandler('coordinator.log'" not in text, name
         assert "FileHandler(f'leg_" not in text, name
+
+
+def test_problems_get_a_file_of_their_own(tmp_path):
+    """The full log is the record; the problems file is the one to open.
+    A warning lands in both, a routine line only in the full one."""
+    _clean()
+    try:
+        path = logsetup.setup('coordinator', root=str(tmp_path))
+        logging.info('a routine poll line')
+        logging.warning('leg A stale for 30s')
+        problems = Path(tmp_path, 'logs', 'coordinator.problems.log')
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+        text = problems.read_text(encoding='utf-8')
+        assert 'leg A stale' in text
+        assert 'a routine poll line' not in text
+        # The control: the full log has both.
+        full = Path(path).read_text(encoding='utf-8')
+        assert 'a routine poll line' in full and 'leg A stale' in full
+    finally:
+        _clean()
+
+
+def test_the_screens_polling_is_not_logged_but_a_press_and_an_error_are(
+        caplog):
+    logsetup.quiet_polling()
+    web = logging.getLogger('werkzeug')
+    with caplog.at_level(logging.INFO, logger='werkzeug'):
+        web.info('127.0.0.1 - - [x] "GET /api/status HTTP/1.1" 200 -')
+        web.info('127.0.0.1 - - [x] "GET /static/app.js?v=1 HTTP/1.1" 304 -')
+        # As the server really writes a 304: coloured.
+        web.info('127.0.0.1 - - [x] "\x1b[36mGET /static/ladder.css?v=1 '
+                 'HTTP/1.1\x1b[0m" 304 -')
+        web.info('127.0.0.1 - - [x] "POST /api/command HTTP/1.1" 200 -')
+        web.info('127.0.0.1 - - [x] "GET /api/status HTTP/1.1" 500 -')
+    text = caplog.text
+    assert 'GET /api/status HTTP/1.1" 200' not in text
+    assert 'app.js' not in text
+    assert 'ladder.css' not in text
+    # The controls: an action and a failure are still there.
+    assert 'POST /api/command' in text
+    assert '" 500' in text

@@ -19,10 +19,37 @@ from mt5trader.coordinator import Coordinator
 from mt5trader.database import Store
 from mt5trader import logsetup
 from mt5trader.legs import RemoteLeg
+from mt5trader.convert import ConvertedLeg, conversions_from_config
+from mt5trader.fx import FxBook
 from mt5trader.shutdown import should_close
 
 
-def build_legs(config, retries=3, delay=1.0):
+class LegConverter:
+    """Wraps each account's leg so a dollar leg is priced in rupees.
+
+    Holds the RAW legs too: an FX rate read from a live symbol must be
+    read UNCONVERTED, or USDINR would be multiplied by itself.
+    """
+
+    def __init__(self, config):
+        self.config = config
+        self.raw = {}
+        self.fx = FxBook(raw=config.fx, config_path=config.path,
+                         leg_for=self.raw.get)
+        self.conversions, clashes = conversions_from_config(config)
+        for clash in clashes:
+            logging.error('conversion clash: %s — the second is ignored',
+                          clash)
+
+    def wrap(self, name, leg):
+        if leg is None:
+            return None
+        self.raw[name] = leg
+        convs = self.conversions.get(name)
+        return ConvertedLeg(leg, convs, self.fx) if convs else leg
+
+
+def build_legs(config, retries=3, delay=1.0, converter=None):
     """One RemoteLeg per account with an endpoint.
 
     An account without one has no runner: it cannot serve a leg, and
@@ -40,11 +67,11 @@ def build_legs(config, retries=3, delay=1.0):
             continue
         leg = RemoteLeg(name, account.endpoint)
         if leg.connect(retries=retries, delay=delay):
-            legs[name] = leg
+            legs[name] = converter.wrap(name, leg) if converter else leg
     return legs
 
 
-def leg_factory(config):
+def leg_factory(config, converter=None):
     """Try ONCE to bring up a leg that was not there before.
 
     The coordinator calls this on a slow clock for every configured
@@ -57,7 +84,9 @@ def leg_factory(config):
         if account is None or not account.endpoint:
             return None
         leg = RemoteLeg(name, account.endpoint)
-        return leg if leg.connect(retries=1, delay=0.0) else None
+        if not leg.connect(retries=1, delay=0.0):
+            return None
+        return converter.wrap(name, leg) if converter else leg
     return connect
 
 
@@ -81,7 +110,8 @@ def main():
     logsetup.setup('coordinator')
 
     config = TraderConfig.from_file(args.config)
-    legs = build_legs(config)
+    converter = LegConverter(config)
+    legs = build_legs(config, converter=converter)
     if not legs:
         # NOT fatal, and this is the whole point of the change. Exiting
         # here meant the launcher restarted the coordinator, it exited
@@ -104,7 +134,8 @@ def main():
     # comes back empty and every live position looks like an orphan.
     coordinator = Coordinator(config, legs, status_path=args.status,
                               store=Store(args.db),
-                              leg_factory=leg_factory(config))
+                              leg_factory=leg_factory(config, converter))
+    coordinator.fxbook = converter.fx
     # PRIME before the first drain. Everything already in the command
     # file was written to a process that is gone; replaying it would
     # place those orders again, now, at today's prices.

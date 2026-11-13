@@ -157,44 +157,42 @@ def test_a_position_already_working_an_exit_is_not_given_a_second(engine,
 
 # -- and what must NOT take it away ----------------------------------------
 
-def test_turning_AutoRouting_off_leaves_the_trader_s_exit_alone(engine, pair):
-    """The one that matters. Standing AutoRouting down pulls what
-    AutoRouting armed; a hand-rested exit is the trader's, and taking
-    it away leaves a live position with no target and nobody told."""
+def test_the_tidy_up_leaves_the_trader_s_exit_alone(engine, pair):
+    """The one that matters. Every poll pulls the closing orders that
+    must not stay; a hand-rested exit is the trader's, and taking it
+    away leaves a live position with no target and nobody told."""
     coordinator = engine
-    coordinator.config.settings['AUTO_ROUTE_ENABLED'] = True
-    pair.auto_route = True
     position = market_entry(coordinator, pair)
     coordinator.close_at_limit(pair.key, 12.5)
 
-    pair.auto_route = False
-    coordinator.work_auto_route(pair, coordinator.market.get(pair.key))
+    coordinator.tidy_closing_orders(pair)
 
     resting = coordinator.book.orders_for_position(position.position_id)
     assert len(resting) == 1 and resting[0].level == 12.5
 
 
-def test_turning_AutoRouting_off_DOES_pull_what_AutoRouting_armed(engine,
-                                                                  pair, legs):
-    """The control: the filter must not turn the stand-down into a
-    no-op. An automation switched off that leaves its order resting has
-    stood nothing down."""
+def test_an_AutoRouting_target_left_from_before_is_pulled(engine, pair):
+    """The control: AutoRouting has been removed, and a target it armed
+    before the upgrade must not be left resting — that order would
+    still fill."""
     coordinator = engine
-    coordinator.config.settings['AUTO_ROUTE_ENABLED'] = True
-    coordinator.config.settings['TP_TARGET_PCT_OF_MARGIN'] = 2.0
-    legs['acct_a'].broker.margin_per_lot = 3000.0
-    legs['acct_b'].broker.margin_per_lot = 2000.0
-    pair.auto_route = True
-
     position = market_entry(coordinator, pair)
-    coordinator.poll_once()
-    armed = coordinator.book.orders_for_position(position.position_id)
-    assert len(armed) == 1 and armed[0].auto_armed is True
+    coordinator.close_at_limit(pair.key, 12.5)
+    # As one would come back from before the upgrade: a target marked as
+    # automation's, resting against the same position.
+    from mt5trader.models import OrderType
+    leftover = coordinator.book.add_order(
+        pair, position.side.opposite, 13.0, position.quantity,
+        order_type=OrderType.LIMIT, position_id=position.position_id,
+        auto_armed=True)
+    assert leftover.auto_armed is True
+    assert len(coordinator.book.orders_for_position(
+        position.position_id)) == 2
 
-    pair.auto_route = False
-    coordinator.work_auto_route(pair, coordinator.market.get(pair.key))
+    coordinator.tidy_closing_orders(pair)
 
-    assert coordinator.book.orders_for_position(position.position_id) == []
+    resting = coordinator.book.orders_for_position(position.position_id)
+    assert [o.level for o in resting] == [12.5]       # the trader's stays
 
 
 def test_a_closing_order_still_goes_when_its_POSITION_goes(engine, pair):
@@ -205,7 +203,7 @@ def test_a_closing_order_still_goes_when_its_POSITION_goes(engine, pair):
     coordinator.close_at_limit(pair.key, 12.5)
 
     position.closed_at = 1_700_000_000.0
-    coordinator.work_auto_route(pair, coordinator.market.get(pair.key))
+    coordinator.tidy_closing_orders(pair)
 
     assert coordinator.book.orders_for_position(position.position_id) == []
 

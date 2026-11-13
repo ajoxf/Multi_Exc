@@ -1,4 +1,16 @@
-"""LIMIT mode: quote one leg, cross the other — and hold closing levels.
+"""Working orders: held levels that cross both legs when the SPREAD
+gets there - and, behind a desk setting, the old one-leg quote.
+
+BY DEFAULT NOTHING RESTS AT THE BROKER (`WORKING_ORDERS` = TRIGGER).
+An entry is a level this module watches, exactly as a close always
+was: when the EXECUTABLE spread reaches it, both legs cross at MARKET
+together through the executor's own market path. See
+`Quoter._work_trigger` for why the quote below stopped being the
+default - a limit on one of two legs that move together fills on the
+market's move, not the spread's, and every such fill is a bad one.
+
+What follows is the QUOTE path, still here for a pair whose legs are
+genuinely independent:
 
 TWO KINDS OF RESTING ORDER LIVE HERE, and they are not symmetric.
 
@@ -63,6 +75,7 @@ import logging
 from . import sizing
 from .book import close_failure
 from .executor import slippage
+from .spread import compute_spread
 from .models import (LegFill, OrderState, OrderType, SpreadPosition,
                      SpreadSide, new_id)
 
@@ -114,6 +127,12 @@ class QuoteGroup:
         #: certainly did not ask for.
         self.open_after = 0.0
         self.escalated = False
+        #: An ENTRY held here and crossed at the level (`WORKING_ORDERS`
+        #: TRIGGER): nothing at the broker, by design, like a close.
+        self.held = False
+        #: Times the poll saw the level and the fresh re-read just
+        #: before sending did not: a flicker NOT traded.
+        self.rechecks_missed = 0
 
     @property
     def quantity(self):
@@ -130,7 +149,10 @@ class QuoteGroup:
                 # A close touches BOTH legs by ticket. Naming the
                 # quoting leg here would say an order rests on one
                 # account, which is the thing that was never true.
-                'leg': 'BOTH' if self.closing else self.leg.upper(),
+                'leg': 'BOTH' if (self.closing or self.held)
+                       else self.leg.upper(),
+                'held': self.held,
+                'rechecks_missed': self.rechecks_missed,
                 'position_id': self.position_id,
                 'intent': 'CLOSE' if self.closing else 'OPEN',
                 'ticket': self.ticket, 'price': self.price,
@@ -215,6 +237,11 @@ class Quoter:
 
     def __init__(self, config, legs, executor, book):
         self.config = config
+        #: Called with (pair key, reason, side, level) when a working
+        #: order that reached its level could not go on - in the
+        #: broker's words. Set by the coordinator, to the journal, so
+        #: the desk and Telegram say it rather than the order vanishing.
+        self.on_refusal = None
         self.legs = legs
         self.executor = executor
         self.book = book
@@ -255,6 +282,7 @@ class Quoter:
             group = QuoteGroup(order.pair_key, order.side, order.level,
                                quoting_leg(pair),
                                position_id=order.position_id)
+            group.held = order.position_id is None and self.triggers()
             self.groups[key] = group
         if order not in group.orders:
             group.orders.append(order)
@@ -285,6 +313,13 @@ class Quoter:
                 # level this system watches, and a close by TICKET when
                 # the market reaches it.
                 event = self._work_closing(pair, md, group)
+                if event:
+                    events.append(event)
+                continue
+            if group.held and group.ticket is None:
+                # A held entry: nothing at the broker, both legs cross
+                # when the spread reaches the level.
+                event = self._work_trigger(pair, md, group)
                 if event:
                     events.append(event)
                 continue
@@ -819,6 +854,157 @@ class Quoter:
                          or state.get('position_tickets'))
         return state, filled
 
+    def triggers(self):
+        """Are entries held here and crossed at the level (the default),
+        rather than quoted on one leg at the broker?"""
+        return str(self.config.get('WORKING_ORDERS', 'TRIGGER')
+                   or 'TRIGGER').upper() != 'QUOTE'
+
+    def _work_trigger(self, pair, md, group):
+        """One pass over a held ENTRY. Nothing of this is at the broker.
+
+        WHY NOT A LIMIT ON ONE LEG. Live on spot gold against the gold
+        future: SELL clicked at 28.30, on at 26.84 - and the half-size
+        one before it 0.25 worse, the same way. The limit rested on
+        GCZ6 at 28.30 + XAUUSD's ask. It can only fill when GCZ6 rises
+        to it, and two legs that are the same metal rise TOGETHER: by
+        the time the fill was seen and XAUUSD crossed, its ask had
+        risen by the same $1.46. A fill there is a move in gold, not in
+        the spread, so every fill is a bad one, and a gold move the
+        other way never fills at all.
+
+        So the order is held HERE, like a close. When the EXECUTABLE
+        spread is at the level or better - the Sell spread at or over a
+        SELL, the Buy spread at or under a BUY, the side the ladder drew
+        it on - both legs cross at MARKET together, through the same
+        `market_entry` a market click takes: the same sizing, the same
+        unwind of a leg that goes on alone, the same refusals in the
+        broker's words. It fills when the SPREAD gets there.
+
+        What it costs, honestly: both legs' bid-ask (the quote earned
+        one), and it is only working while this is running - which the
+        quote was too, since our pendings are swept at shutdown.
+        """
+        key = self.key_for_group(group)
+        if not group.quantity:
+            self.groups.pop(key, None)
+            return None
+        if not md or md.get('guard_reason'):
+            # Not fired off a print the system itself does not trust:
+            # the level is still there when the quote is good again.
+            group.reason = (f"{(md or {}).get('guard_reason') or 'no price'}"
+                            f" — holding the order, nothing sent")
+            return None
+        if not closing_trigger_reached(group.side, group.level, md):
+            group.reason = None
+            return None
+
+        if self.config.get('RECHECK_BEFORE_SEND', True):
+            # The poll saw the level. Is it STILL there? Read both legs
+            # again now, and send on those prices or not at all.
+            fresh, why = self._fresh_market(pair, md)
+            if fresh is None:
+                group.reason = (f'could not re-read the prices before '
+                                f'sending ({why}) — nothing sent')
+                return None
+            if not closing_trigger_reached(group.side, group.level, fresh):
+                group.rechecks_missed += 1
+                group.reason = None
+                logging.info(
+                    '%s: %s at %s - the poll saw the level, the fresh '
+                    'prices did not (%s %s); not sent, still working',
+                    pair.key, group.side.value, group.level,
+                    'Sell spread' if group.side is SpreadSide.SELL
+                    else 'Buy spread',
+                    fresh.get('short_spread' if group.side is SpreadSide.SELL
+                              else 'long_spread'))
+                return {'group': key, 'action': 'recheck_missed',
+                        'level': group.level}
+            md = fresh
+
+        quantity = group.quantity
+        try:
+            result = self.executor.market_entry(
+                pair, group.side, md, quantity, clicked_level=group.level)
+        except Exception as e:
+            # A network call inside the pricing pass. Raising out of
+            # `work()` would take every pair's orders down with it.
+            result = None
+            reason = f'the order raised: {e}'
+        else:
+            reason = result.reason
+        if result is not None and result.ok and result.position:
+            position = result.position
+            position.order_type = OrderType.LIMIT
+            # Scored against the level the trader NAMED, as a working
+            # order always was - not the touch it crossed.
+            position.entry_slippage = slippage(group.level,
+                                               position.entry_spread,
+                                               group.side)
+            position = self.book.add_position(position)
+            self._settle_orders(group, position.quantity or quantity)
+            if not group.quantity:
+                self.groups.pop(key, None)
+            self._remember(position)
+            logging.info('%s: %s %g at %s reached - both legs crossed, on at '
+                         '%s', pair.key, group.side.value, quantity,
+                         group.level, position.entry_spread)
+            return {'group': key, 'action': 'triggered', 'ok': True,
+                    'position': position.position_id,
+                    'level': group.level,
+                    'entry_spread': position.entry_spread}
+
+        # It reached its level and did not go on. The order ENDS, with
+        # the broker's own words on it: a refusal re-fired three times a
+        # second is a broker hammered, and an entry is never owed.
+        reason = (f'reached {group.level:g} but did not go on: '
+                  f'{reason or "no reason given"}')
+        logging.warning('%s: %s %g - %s', pair.key, group.side.value,
+                        quantity, reason)
+        for order in group.orders:
+            if order.is_working:
+                order.state = OrderState.REJECTED
+                order.reason = reason
+        self.groups.pop(key, None)
+        if self.on_refusal is not None:
+            try:
+                self.on_refusal(pair.key, reason, group.side.value,
+                                group.level)
+            except Exception as e:            # never lose the pass
+                logging.error('could not record the refusal: %s', e)
+        return {'group': key, 'action': 'rejected', 'ok': False,
+                'reason': reason,
+                'naked': getattr(result, 'naked', None)}
+
+    def _fresh_market(self, pair, md):
+        """Both legs' prices read NOW, as the poll's market data.
+
+        Returns (md, None), or (None, why) when either leg could not be
+        read - and then nothing is sent: the point of looking again is
+        lost if the look is skipped. Everything the poll measured that
+        a tick cannot (the guards, sigma) is carried over from `md`.
+        """
+        ticks = {}
+        for name, account, symbol in (('A', pair.account_a, pair.symbol_a),
+                                      ('B', pair.account_b, pair.symbol_b)):
+            leg = self.legs.get(account)
+            try:
+                tick = leg.tick(symbol) if leg is not None else None
+            except Exception as e:
+                tick, error = None, str(e)
+            else:
+                error = 'no tick'
+            if not tick:
+                return None, f'leg {name} {symbol}: {error}'
+            ticks[name] = tick
+        try:
+            fresh = compute_spread(pair, ticks['A'], ticks['B'],
+                                   pair.hedge_ratio,
+                                   clock=self.executor.clock)
+        except Exception as e:
+            return None, f'the prices did not make a spread: {e}'
+        return dict(md, **fresh), None
+
     def _work_closing(self, pair, md, group):
         """One pass over a resting CLOSE. Nothing of this is at the broker.
 
@@ -1033,16 +1219,14 @@ class Quoter:
         return (group.pair_key, group.side.value, round(group.level, 10),
                 group.position_id)
 
-    def arm(self, pair, position, level, quantity=None, auto=True):
-        """Rest a working order to CLOSE `position` at `level`.
+    def arm(self, pair, position, level, quantity=None, auto=False):
+        """Rest a working order to CLOSE `position` at `level` — the
+        trader's own, from a reducing click or Close @ Limit.
 
-        This is what AutoRouting does on a fill, and it is not a
-        strategy: it places the exit order the trader would otherwise
-        place by hand, at a level derived from settings they typed. No
-        signal, no re-entry, no loop.
-
-        It arms a TARGET and NO STOP — the position runs until the
-        target, the overnight rule, or the trader.
+        `auto` marks an order as automation's. Nothing arms one any more
+        (AutoRouting has been removed); the mark is kept so a target it
+        armed before the upgrade can still be told apart from the
+        trader's and pulled on its own.
         """
         if level is None:
             return None
@@ -1255,7 +1439,7 @@ class Quoter:
                 continue
             row = group.to_dict()
             pair = self.config.pairs.get(group.pair_key)
-            if pair is not None:
+            if pair is not None and not group.held:
                 on_a = group.leg == 'a'
                 row['account'] = pair.account_a if on_a else pair.account_b
                 row['symbol'] = pair.symbol_a if on_a else pair.symbol_b

@@ -1,8 +1,10 @@
 """The fair-value algo — and the line an algo must not cross.
 
-This system is a MANUAL ladder. Every rule it is built on says so, and
-the rule that matters most here is the one an algo is most likely to
-break: nothing places, modifies or cancels an order by itself.
+This system is a MANUAL ladder with signals beside it. The rule that
+matters most here is the one an algo is most likely to break: signals
+may be computed and shown, but nothing places, modifies or cancels an
+order by itself. (The Algo's own rules are in test_algo_signal.py and
+test_algo_desk.py.)
 
 So these tests are in two halves. The first says the arithmetic is
 right — which KIND of pair this is, and therefore what its carry runs
@@ -115,6 +117,62 @@ def test_no_algo_module_can_reach_the_broker():
     assert found == set(), found
 
 
+#: What PLACES, CHANGES or CANCELS an order, by any route. The Algo's
+#: runtime may read a leg — it asks MT5 for history bars — but nothing
+#: on this list may appear in it as code.
+ORDER_VERBS = {'place_limit', 'send_market_order', 'close_ticket',
+               'cancel_order', 'modify_order', 'order_send', 'executor',
+               'quoter', 'click', 'close_position', 'order', 'place',
+               'flatten', 'arm'}
+
+
+def _code_names(path):
+    import ast
+    import pathlib
+    tree = ast.parse(pathlib.Path(path).read_text())
+    names, imports = set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        if isinstance(node, ast.Import):
+            imports.update(alias.name for alias in node.names)
+        if isinstance(node, ast.ImportFrom):
+            imports.update(f"{node.module or '.'}:{alias.name}"
+                           for alias in node.names)
+    return names, imports
+
+
+def test_the_band_is_arithmetic_and_nothing_else():
+    names, imports = _code_names('mt5trader/bands.py')
+    assert imports == {'math'}, imports
+    assert names & (ORDER_VERBS | {'broker', 'legs'}) == set()
+
+
+def test_the_entry_filters_are_arithmetic_and_nothing_else():
+    names, imports = _code_names('mt5trader/algofilters.py')
+    assert imports == {'math'}, imports
+    assert names & (ORDER_VERBS | {'broker', 'legs'}) == set()
+
+
+def test_the_algo_runtime_reads_history_and_cannot_place_an_order():
+    """The seam execution will plug into is the SINK. Until then, the
+    module that runs the Algo must not be able to reach an order by any
+    route — checked as code, because the way this breaks is an edit
+    that looks harmless."""
+    names, imports = _code_names('mt5trader/algodesk.py')
+    assert imports <= {'logging', 're', 'collections:deque', '.:algo',
+                       '.:bands', '.:algofilters'}, \
+        imports
+    assert names & ORDER_VERBS == set(), names & ORDER_VERBS
+    # The control: the checker does see a verb when there is one.
+    import ast
+    tree = ast.parse('leg.order("X", "BUY", 1)')
+    assert {n.attr for n in ast.walk(tree)
+            if isinstance(n, ast.Attribute)} & ORDER_VERBS == {'order'}
+
+
 def test_selecting_an_algo_changes_NOTHING_about_a_click(config, pair, legs):
     """The whole promise. The same click, on the same market, with the
     algo off and then with it on and shouting — and the two must be
@@ -164,3 +222,41 @@ def test_a_ladder_running_NONE_computes_nothing_at_all(config, pair, legs):
     coordinator.poll_once()
     block = coordinator.snapshot()['pairs'][pair.key]['algo_block']
     assert block['algo'] == 'FAIR_SPREAD' and 'fair' in block
+
+
+def test_the_live_sink_reaches_orders_ONLY_through_the_coordinator():
+    """The one Algo module that may trade does it through the two
+    coordinator methods a manual click's executor sits behind — never a
+    broker, a leg or the executor directly."""
+    names, imports = _code_names('mt5trader/algoexec.py')
+    assert imports == set(), imports
+    assert names & {'broker', 'legs', 'executor', 'order_send',
+                    'send_market_order', 'close_ticket', 'place_limit'} \
+        == set()
+    calls = {n for n in names if n.startswith('algo_')}
+    assert calls == {'algo_enter', 'algo_exit'}, calls
+
+
+def test_the_signal_journals_shadow_algo_cannot_reach_an_order():
+    """The journal runs the Algo's own code beside the desk - which is
+    only safe while that code has nothing to send to. It imports the
+    Algo, the filters and `judge_filters`, and nothing that places,
+    changes or cancels an order may appear in it as code."""
+    names, imports = _code_names('mt5trader/shadow.py')
+    assert imports == {'.:algo', '.:algofilters',
+                       'algodesk:WARMUP_CARRY_SEC',
+                       'algodesk:WARMUP_GAP_SEC',
+                       'algodesk:judge_filters'}, imports
+    assert names & (ORDER_VERBS | {'broker', 'legs', 'live', 'sink',
+                                   'send', 'enter', 'leave'}) == set(), \
+        names & ORDER_VERBS
+
+
+def test_the_sigma_zones_are_arithmetic_and_nothing_else():
+    """The zone track is a READING. It records what the spread did and
+    what the Algo would have made of it; it must not be able to reach
+    an order by any route — the same rule `bands` and `algofilters`
+    are held to, and for the same reason."""
+    names, imports = _code_names('mt5trader/zones.py')
+    assert imports == {'math'}, imports
+    assert names & (ORDER_VERBS | {'broker', 'legs'}) == set()

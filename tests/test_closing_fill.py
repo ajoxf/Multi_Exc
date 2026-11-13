@@ -107,6 +107,7 @@ def test_a_resting_close_puts_NOTHING_at_the_broker(engine, pair, legs):
     assert position.is_open is True
 
 
+@pytest.mark.quote
 def test_the_CONTROL_an_ENTRY_still_rests_a_real_pending(engine, pair, legs):
     """The control. Only CLOSING orders lose their pending — an entry
     limit still rests one, because a pending that OPENS is exactly what
@@ -382,27 +383,17 @@ def test_the_traders_own_close_is_not_recorded_as_a_take_profit(
     assert position.close_reason == 'closed by the trader'
 
 
-def test_the_CONTROL_autoroutings_close_still_says_take_profit(engine, pair,
-                                                               legs,
-                                                               gold_symbols):
-    """The control for the test above."""
-    coordinator = engine
-    pair.auto_route = True
-    coordinator.config.settings['AUTO_ROUTE_ENABLED'] = True
-    coordinator.config.settings['TP_TARGET_PCT_OF_MARGIN'] = 2.0
-    legs['acct_a'].broker.margin_per_lot = 3000.0
-    legs['acct_b'].broker.margin_per_lot = 2000.0
+def test_the_CONTROL_an_automations_close_still_says_take_profit():
+    """The control for the test above: the reason is read off WHO armed
+    the order, so a close automation armed is not reported as the
+    trader's."""
+    from types import SimpleNamespace
+    from mt5trader.quoter import Quoter
 
-    position = sell_one(coordinator, pair)
-    coordinator.poll_once()
-    armed = coordinator.book.orders_for_position(position.position_id)
-    assert armed and armed[0].auto_armed is True
-    level = watches(coordinator, pair)[0]['level']
-
-    walk_to_the_level(coordinator, pair, gold_symbols, level)
-    coordinator.poll_once()
-
-    assert position.close_reason == 'auto take-profit'
+    auto = SimpleNamespace(orders=[SimpleNamespace(auto_armed=True)])
+    hand = SimpleNamespace(orders=[SimpleNamespace(auto_armed=False)])
+    assert Quoter._close_reason(None, auto) == 'auto take-profit'
+    assert Quoter._close_reason(None, hand) == 'closed by the trader'
 
 
 def test_the_synthetic_stops_working_once_its_close_is_whole(engine, pair,

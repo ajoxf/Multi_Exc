@@ -21,6 +21,10 @@ from mt5trader.coordinator import Coordinator
 from mt5trader.models import SpreadSide
 
 
+#: The one-leg quote (WORKING_ORDERS = QUOTE); see conftest.
+pytestmark = pytest.mark.quote
+
+
 @pytest.fixture
 def engine(config, pair, legs):
     coordinator = Coordinator(config, legs, sleep=lambda s: None)

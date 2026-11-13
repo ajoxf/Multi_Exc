@@ -1,42 +1,109 @@
 {
   "accounts": {
-    "leg_a": {
-      "terminal_path": "C:\\Program Files\\MetaTrader 5 - A\\terminal64.exe",
+    "cme": {
+      "kind": "mt5",
+      "terminal_path": "C:\\Program Files\\MetaTrader 5 - CME\\terminal64.exe",
       "login": 5000001,
-      "password_env": "MT5_PASSWORD_LEG_A",
+      "password_env": "MT5_PASSWORD_CME",
       "server": "YourBroker-Live",
       "endpoint": "127.0.0.1:9101"
     },
-    "leg_b": {
-      "terminal_path": "C:\\Program Files\\MetaTrader 5 - B\\terminal64.exe",
-      "login": 5000002,
-      "password_env": "MT5_PASSWORD_LEG_B",
-      "server": "YourBroker-Live",
+    "mcx": {
+      "kind": "arrow",
+      "app_id": "YOUR_ARROW_APP_ID",
+      "user_id": "YOUR_ARROW_USER_ID",
+      "password_env": "ARROW_PASSWORD_MCX",
+      "api_secret_env": "ARROW_API_SECRET_MCX",
+      "totp_secret_env": "ARROW_TOTP_SECRET_MCX",
+      "exchange": "MCX",
+      "product": "NRML",
       "endpoint": "127.0.0.1:9102"
     }
   },
+  "fx": {
+    "USDINR": {
+      "source": "manual",
+      "rate": 88.5,
+      "set_at": 0,
+      "max_age_hours": 24
+    }
+  },
   "pairs": {
-    "XAUUSD_|GC1226": {
-      "name": "Gold spot vs Dec future",
+    "CLF7|CRUDEOIL18DEC26FUT": {
+      "name": "Crude: MCX vs NYMEX",
       "leg_a": {
-        "account": "leg_a",
-        "symbol": "XAUUSD_"
+        "account": "cme",
+        "symbol": "CLF7",
+        "fx": "USDINR",
+        "price_factor": 1.0,
+        "price_unit": "bbl"
       },
       "leg_b": {
-        "account": "leg_b",
-        "symbol": "GC1226"
+        "account": "mcx",
+        "symbol": "CRUDEOIL18DEC26FUT",
+        "price_unit": "bbl"
       },
-      "pair_type": "SPOT_FUTURE",
+      "pair_type": "RELATED",
       "hedge_ratio": 1.0,
-      "hedge_ratio_for": "XAUUSD_|GC1226",
-      "increment": null,
-      "clip_lots_a": null,
-      "clip_lots_b": null,
+      "hedge_ratio_for": "CLF7|CRUDEOIL18DEC26FUT",
+      "clip_lots_a": 1.0,
+      "clip_lots_b": 10.0,
       "default_quantity": 1.0,
       "order_type": "LIMIT",
       "time_in_force": "DAY",
       "overnight": "ALLOW",
-      "quoting_leg": null,
+      "enabled": true,
+      "rows": 30
+    },
+    "GCG7|GOLD05FEB27FUT": {
+      "name": "Gold: MCX vs COMEX",
+      "leg_a": {
+        "account": "cme",
+        "symbol": "GCG7",
+        "fx": "USDINR",
+        "price_factor": 0.3215074657,
+        "price_unit": "oz"
+      },
+      "leg_b": {
+        "account": "mcx",
+        "symbol": "GOLD05FEB27FUT",
+        "price_unit": "10g"
+      },
+      "pair_type": "RELATED",
+      "hedge_ratio": 1.0,
+      "hedge_ratio_for": "GCG7|GOLD05FEB27FUT",
+      "clip_lots_a": 1.0,
+      "clip_lots_b": 3.0,
+      "default_quantity": 1.0,
+      "order_type": "LIMIT",
+      "time_in_force": "DAY",
+      "overnight": "ALLOW",
+      "enabled": true,
+      "rows": 30
+    },
+    "SIH7|SILVER05MAR27FUT": {
+      "name": "Silver: MCX vs COMEX",
+      "leg_a": {
+        "account": "cme",
+        "symbol": "SIH7",
+        "fx": "USDINR",
+        "price_factor": 32.150746568,
+        "price_unit": "oz"
+      },
+      "leg_b": {
+        "account": "mcx",
+        "symbol": "SILVER05MAR27FUT",
+        "price_unit": "kg"
+      },
+      "pair_type": "RELATED",
+      "hedge_ratio": 1.0,
+      "hedge_ratio_for": "SIH7|SILVER05MAR27FUT",
+      "clip_lots_a": 1.0,
+      "clip_lots_b": 5.0,
+      "default_quantity": 1.0,
+      "order_type": "LIMIT",
+      "time_in_force": "DAY",
+      "overnight": "ALLOW",
       "enabled": true,
       "rows": 30
     }
@@ -51,6 +118,8 @@
     "MAX_SPREAD_JUMP_SIGMA": 5.0,
     "OVERNIGHT_CLOSE_HOUR": 16,
     "OVERNIGHT_CLOSE_MINUTE": 55,
-    "SHUTDOWN_CLOSE_POSITIONS": "ask"
+    "SHUTDOWN_CLOSE_POSITIONS": "ask",
+    "EXPIRY_WARN_DAYS": 5,
+    "EXPIRY_GAP_DAYS": 3
   }
 }

@@ -104,6 +104,11 @@ class LocalLeg:
     def depth(self, symbol):
         return self.broker.depth(symbol)
 
+    def rates(self, symbol, timeframe_min, count):
+        """History bars, oldest first, or None when there are none."""
+        reader = getattr(self.broker, 'rates', None)
+        return reader(symbol, timeframe_min, count) if reader else None
+
     def margin_for(self, symbol, side, volume, price=None):
         return self.broker.margin_for(symbol, side, volume, price)
 
@@ -162,6 +167,9 @@ class LocalLeg:
             'ok': result.success,
             'filled_volume': filled,
             'price': price,
+            # The touch the order was SENT at, as MT5 was quoting it:
+            # beside `price` it says how far this one leg slipped.
+            'requested_price': result.requested_price,
             'ticket': result.ticket,
             'position_tickets': position_tickets,
             'error': result.error,
@@ -192,6 +200,7 @@ class LocalLeg:
             'ok': result.success,
             'filled_volume': result.volume if result.success else 0.0,
             'price': result.executed_price,
+            'requested_price': result.requested_price,
             'error': result.error,
         }
 
@@ -331,6 +340,14 @@ class RemoteLeg:
         if reply and reply.get('ok'):
             return reply.get('depth')
         return None
+
+    def rates(self, symbol, timeframe_min, count):
+        reply = self._request({'cmd': 'rates', 'symbol': symbol,
+                               'timeframe_min': timeframe_min,
+                               'count': count})
+        if reply and reply.get('ok'):
+            return reply.get('rates')
+        return None       # unknown, which is NOT empty
 
     def resubscribe(self, symbol):
         reply = self._request({'cmd': 'resubscribe', 'symbol': symbol})

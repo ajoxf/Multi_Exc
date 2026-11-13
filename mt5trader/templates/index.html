@@ -112,6 +112,10 @@
     <p id="modal-body"></p>
     <div class="modal-actions">
       <button id="modal-cancel" class="btn">Cancel</button>
+      <!-- A second answer, for the one question that has two: what
+           to do with the Algo's position when it is turned off. Hidden
+           for every other question. -->
+      <button id="modal-alt" class="btn" hidden></button>
       <button id="modal-confirm" class="btn danger"></button>
     </div>
   </div>
@@ -207,12 +211,84 @@
           <tr class="heads"><th></th><th class="col-b" title="Buying the spread">B</th><th class="col-s" title="Selling the spread">S</th></tr>
           <tr><th>B/E</th><td class="be-buy">—</td><td class="be-sell">—</td></tr>
           <tr><th>TP</th><td class="tp-buy">—</td><td class="tp-sell">—</td></tr>
-          <!-- The other two things that decide where a position ends,
+          <!-- The other thing that decides where a position ends,
                read-only beside the two that price it. -->
           <tr><th>o/n</th><td class="x-overnight" colspan="2">—</td></tr>
-          <tr><th>Auto</th><td class="auto-route-state" colspan="2">off</td></tr>
         </table>
         <div class="exit-note hint"></div>
+      </div>
+    </div>
+  </section>
+</template>
+
+<!-- The pair's chart: the Algo's z with its entry and stop lines, and
+     the spread, over time. Opened and closed from the Chart button on
+     the ladder's title bar. Reads only. -->
+<template id="chart-template">
+  <section class="window chartwin">
+    <div class="titlebar">
+      <span class="swatch"></span>
+      <span class="title cw-pair"></span>
+      <span class="winbtns"><button class="winbtn close" title="Close the chart">&times;</button></span>
+    </div>
+    <div class="cw-body">
+      <div class="cw-bar">
+        over the last
+        <select class="cw-minutes" title="How much of the session to draw">
+          <option value="15">15 min</option>
+          <option value="30">30 min</option>
+          <option value="60" selected>1 hour</option>
+          <option value="120">2 hours</option>
+        </select>
+        <span class="cw-size hint"></span>
+        <span class="cw-now"></span>
+      </div>
+      <div class="cw-card">
+        <div class="cw-head">z
+          <span class="cw-key"><b class="k-candle up"></b><b class="k-candle down"></b>z <i class="k-up"></i>+entry <i class="k-down"></i>&minus;entry <span class="cw-key-stop"><i class="k-stop"></i>&plusmn;stop</span></span>
+        </div>
+        <div class="cw-plot cw-z"></div>
+      </div>
+      <div class="cw-card">
+        <div class="cw-head">Spread History
+          <span class="cw-badges"><span class="cw-badge cw-min">Min: &mdash;</span><span class="cw-badge cw-max">Max: &mdash;</span></span>
+        </div>
+        <div class="cw-plot cw-spread"></div>
+      </div>
+      <div class="cw-note hint"></div>
+    </div>
+  </section>
+</template>
+
+<!-- The Algo, one window per ladder while it is on: SIGNAL & POSITION,
+     STATISTICS, FILTERS. Filled from the engine's Algo block on every
+     poll; nothing in it trades — the switch is on the ladder's title
+     bar, and closing this window turns the Algo off. -->
+<template id="algo-template">
+  <section class="window algowin">
+    <div class="titlebar">
+      <span class="swatch"></span>
+      <span class="title aw-pair"></span>
+      <span class="aw-mode"></span>
+      <span class="winbtns"><button class="winbtn aw-cog" title="This ladder&#8217;s Algo settings">&#9881;</button><button class="winbtn close" title="Close — and turn the Algo off for this ladder">&times;</button></span>
+    </div>
+    <div class="aw-body">
+      <div class="aw-section aw-signal"></div>
+      <div class="aw-section aw-stats"></div>
+      <div class="aw-section aw-filters"></div>
+      <!-- What THESE settings would have done on MT5's own history —
+           and without the trend protections, beside it. Sends nothing. -->
+      <div class="aw-section aw-backtest">
+        <div class="aw-head">Backtest</div>
+        <div class="aw-bt-controls">
+          <select class="aw-bt-days" title="How much history, from MT5's own bars">
+            <option value="3">last 3 days</option>
+            <option value="5" selected>last 5 days</option>
+            <option value="10">last 10 days</option>
+          </select>
+          <button type="button" class="aw-bt-run" title="Replay the history through this ladder's Algo, with its settings as they are now. Nothing is sent.">Run backtest</button>
+        </div>
+        <div class="aw-bt-out hint">What these settings would have done — nothing is sent.</div>
       </div>
     </div>
   </section>
@@ -225,7 +301,19 @@
       <span class="title"></span>
       <span class="route"></span>
       <span class="mode-badge"></span>
-      <span class="winbtns"><button class="winbtn ladder-cog" title="This ladder's own settings — mode, exit costs, AutoRoute, carry">&#9881;</button><button class="winbtn close" title="Close this ladder">&times;</button></span>
+      <!-- The Algo's switch, where the ladder is: OFF / SIGNALS / LIVE,
+           one click to the menu. LIVE still asks to confirm, and the
+           engine still refuses what it cannot do. -->
+      <span class="algo-switch">
+        <button type="button" class="algo-btn" title="This ladder's Algo — click to turn it off, to Signals, or LIVE">ALGO OFF</button>
+        <span class="algo-menu" hidden>
+          <button type="button" data-algo="NONE">Off</button>
+          <button type="button" data-algo="ALGO">Signals — the Algo signals, you trade</button>
+          <button type="button" data-algo="ALGO_LIVE" class="live">LIVE — it trades</button>
+        </span>
+      </span>
+      <button type="button" class="chart-btn" title="Open or close this ladder&#8217;s chart: the Algo&#8217;s z with its entry and stop lines, and the spread">Chart</button>
+      <span class="winbtns"><button class="winbtn ladder-cog" title="This ladder's own settings — mode, exit costs, carry, Algo">&#9881;</button><button class="winbtn close" title="Close this ladder">&times;</button></span>
     </div>
     <div class="quotestrip">
       <span class="netchg">—</span>
@@ -239,6 +327,10 @@
       </div>
       <span class="ours" title="Where the two terminals publish session figures, H/L/O are the LEGS' own — B − β × A, the same convention as every other price here. Where they do not, they are our own mid series since this process started, and this badge says so.">ours</span>
     </div>
+    <!-- Algo or Manual, never both: while this ladder's Algo is LIVE
+         the order controls are off, and the ladder SAYS so rather
+         than letting a click fail afterwards. -->
+    <div class="algo-lock" hidden>ALGO LIVE — manual orders are off on this ladder. CLOSE ALL and Close @ LMT still close. Turn the Algo off in the title bar to trade by hand.</div>
     <div class="body">
       <div class="rail">
         <!-- Which two accounts this ladder is routed across, with their
@@ -420,10 +512,52 @@
               <option value="EXIT_IF_PROFIT">Exit if in profit</option>
               <option value="EXIT_ALWAYS">Exit anyway</option>
             </select></label>
+          <!-- THIS LADDER'S HOURS, on the broker's clock. An oil future
+               and a gold CFD do not keep the same day: blank close is
+               the desk-wide cutoff, blank open is any time before it,
+               and the break takes both ends or neither. -->
+          <label class="lsf" title="When this ladder's session starts, HH:MM broker time. Before it, the Algo takes no new entry and a silent feed is not a fault. Blank: any time before the close. An open after the close is a session that runs over midnight.">
+            <span>Session open</span>
+            <input class="ls-session-open" type="text" inputmode="numeric" placeholder="any" maxlength="5"></label>
+          <label class="lsf" title="This ladder's session cutoff, HH:MM broker time: DAY orders are cancelled, the Overnight rule runs and the Algo's last entry is before it. Blank: the desk-wide cutoff.">
+            <span>Session close</span>
+            <input class="ls-session-close" type="text" inputmode="numeric" placeholder="desk cutoff" maxlength="5"></label>
+          <label class="lsf" title="A daily break (a futures maintenance pause), HH:MM broker time: no Algo entries, and a silent feed is expected rather than a fault. Exits are never held. Both ends or neither.">
+            <span>Break start</span>
+            <input class="ls-break-start" type="text" inputmode="numeric" placeholder="none" maxlength="5"></label>
+          <label class="lsf" title="When the daily break ends, HH:MM broker time.">
+            <span>Break end</span>
+            <input class="ls-break-end" type="text" inputmode="numeric" placeholder="none" maxlength="5"></label>
+          <!-- The ARBITRAGE ALERT: it tells the trader, it never orders.
+               Normal + margin + sigmas: all three must say "unusual". -->
+          <div class="lsf-note ls-arb-head"><b>Arbitrage alert</b> — screen,
+            sound and Telegram when the gap after costs is unusually wide.
+            It never places an order.</div>
           <label class="lsf check-row"
-                 title="On a fill, rest a working order to close that position at the take-profit, priced from the price it actually filled at. It arms a TARGET AND NO STOP: the position runs until the target, the overnight rule, or you.">
-            <span>AutoRoute</span>
-            <input type="checkbox" class="ls-auto-route"></label>
+                 title="Watch this pair's executable gap and alert when it clears the margin AND is unusual against its own recent history. Alert only.">
+            <span>Arb alert</span>
+            <input type="checkbox" class="ls-arb-alert"></label>
+          <label class="lsf"><span>Normal gap</span>
+            <input class="ls-arb-normal" type="number" step="any" placeholder="0"
+                   title="What this pair's gap normally is, in spread units (Rs per bbl / per 10 g / per kg). Crude: about 0. Added to the % below."></label>
+          <label class="lsf"><span>Normal gap %</span>
+            <input class="ls-arb-normal-pct" type="number" step="any" placeholder="0"
+                   title="The normal gap as a percent of leg B's price — MCX gold and silver carry import duty and sit a few percent above COMEX."></label>
+          <label class="lsf"><span>Edge needed</span>
+            <input class="ls-arb-margin" type="number" min="0" step="any" placeholder="required"
+                   title="The net edge, AFTER costs, the gap must clear beyond normal before it alerts — in spread units, e.g. 20 = Rs 20 per bbl."></label>
+          <label class="lsf"><span>Other cost/unit</span>
+            <input class="ls-arb-extra" type="number" min="0" step="any" placeholder="0"
+                   title="Per-unit costs not in the commission boxes — CTT, exchange fees, stamp duty — in spread units. Commission and the exit crossing are already counted."></label>
+          <label class="lsf"><span>USDINR hedge/lot</span>
+            <input class="ls-fx-hedge-cost" type="number" min="0" step="any" placeholder="not costed"
+                   title="What ONE NSE USDINR futures lot costs you ROUND TRIP, all-in — brokerage, fees, bid/offer — in rupees. The number of lots is worked out from leg A's dollar notional (e.g. $88,400 = 88 lots) and the total goes into the alert's cost."></label>
+          <label class="lsf"><span>USDINR lot $</span>
+            <input class="ls-fx-hedge-lot" type="number" min="1" step="any" placeholder="1000"
+                   title="Dollars in one USDINR futures lot. NSE's is $1,000."></label>
+          <label class="lsf"><span>Sigmas</span>
+            <input class="ls-arb-z" type="number" min="0" step="any" placeholder="2"
+                   title="How unusual against the last 5 minutes: the spread's z must be past this many sigmas in the same direction. 0 turns this test off."></label>
           <label class="lsf"><span>Comm/lot A</span>
             <input class="ls-comm-a" type="number" min="0" step="0.01" placeholder="default"></label>
           <label class="lsf"><span>Comm/lot B</span>
@@ -445,22 +579,6 @@
         </div>
         <div class="ls-group">
           <h4>Carry <small class="ls-pairtype"></small></h4>
-          <!-- ONE control, because there is one decision. A dropdown
-               offering None or Fair spread, plus a separate Show
-               window tick, was two controls for it — and either one
-               alone did nothing anybody could see. The tick opens the
-               window and computes the reading; unticked, neither
-               happens and the ladder costs nothing extra on the wire.
-
-               It READS. It does not place, modify or cancel an order,
-               and a click on the ladder behaves identically either
-               way. Manual trading is untouched. -->
-          <label class="lsf check-row"
-                 title="A floating window for this pair: what the carry says the basis should be, with break-even and the target beside it. It is a reading — nothing here trades, and no price from it is ever sent to the broker.">
-            <span>Show Fair Spread window</span>
-            <input type="checkbox" class="ls-algo-window"></label>
-          <div class="lsf-note hint">The window reads; it does not
-            trade. Clicks on the ladder are unaffected.</div>
           <!-- DECLARED, not inferred. Two futures with two expiries are
                not a calendar: UKOILV6 against USOILV6 is Brent against
                WTI, which is two different instruments with no carry
@@ -491,6 +609,183 @@
             <input class="ls-swap-b-short" type="number" step="0.01" placeholder="from MT5"></label>
           <label class="lsf"><span>Carry rate % a year</span>
             <input class="ls-carry-rate" type="number" step="0.1" placeholder="no cross-check"></label>
+        </div>
+        <!-- ONE control for one decision: what this ladder's window
+             reads. Fair spread is the carry; Algo is the z-score signal
+             on Bollinger bands of the spread. One at a time.
+
+             Both READ. Neither places, modifies or cancels an order,
+             and a click on the ladder behaves identically whichever is
+             picked. Algo is switched on in the running engine and is
+             OFF again after every restart; Fair spread is saved. -->
+        <div class="ls-group">
+          <h4>Algo <small class="ls-algo-state"></small></h4>
+          <label class="lsf"
+                 title="Turn this ladder&#8217;s Algo on or off. Signals: it signals entries and watches YOUR position&#8217;s TP and SL, with an alert and a chime; it sends nothing and you trade on the ladder. LIVE: it trades this ladder by its rules, and manual orders on it are off. Fair spread: no Algo, the carry reading only.">
+            <span>Algo</span>
+            <select class="ls-algo">
+              <option value="NONE">Off</option>
+              <option value="FAIR_SPREAD">Fair spread</option>
+              <option value="ALGO">Signals</option>
+              <option value="ALGO_LIVE">LIVE (trades)</option>
+            </select></label>
+          <label class="lsf" title="Enter when the executable spread is this many sigma from the middle line: SELL at +z or above, BUY at &#8722;z or below.">
+            <span>Entry z</span>
+            <input class="ls-az-entry" type="number" min="0.1" step="0.1"></label>
+          <label class="lsf" title="Which way the Algo may ENTER. H to L sells the spread (the bid side, when it stretches up); L to H buys it (the offer side, when it stretches down). Exits are never restricted.">
+            <span>Direction</span>
+            <select class="ls-az-direction">
+              <option value="BOTH">Both</option>
+              <option value="H_TO_L">H to L only</option>
+              <option value="L_TO_H">L to H only</option>
+            </select></label>
+          <label class="lsf" title="The candle the band is built from. MT5&#8217;s own bars are loaded for it when the Algo is turned on.">
+            <span>Candle</span>
+            <select class="ls-az-tf">
+              <option value="1">1 min</option>
+              <option value="5">5 min</option>
+              <option value="15">15 min</option>
+              <option value="30">30 min</option>
+              <option value="60">1 hour</option>
+              <option value="240">4 hours</option>
+            </select></label>
+          <label class="lsf" title="N: the EMA middle line and the sigma are over this many candles, the forming one included.">
+            <span>Length (candles)</span>
+            <input class="ls-az-length" type="number" min="2" step="1"></label>
+          <label class="lsf" title="The entry must hold for this many fresh prices in a row, so one flicker does not signal.">
+            <span>Confirm (ticks)</span>
+            <input class="ls-az-confirm" type="number" min="1" step="1"></label>
+          <label class="lsf" title="No entry signal past this |z| — that is a blow-out, not a stretch. 0 = no cap.">
+            <span>Max entry z</span>
+            <input class="ls-az-max" type="number" min="0" step="0.1"></label>
+          <label class="lsf check-row" title="Re-entry: do not enter on the TOUCH of the band. A side is armed when its stretch reaches Entry z, and enters when it comes back inside by this much (2.0 armed, 1.5 enters). A spread riding the band in a trend never comes back, so it gives no entry. Lost if the spread reaches the mean first.">
+            <span>Re-entry back by</span>
+            <input type="checkbox" class="ls-az-reentry-on">
+            <input class="ls-az-reentry" type="number" min="0.05" step="0.1"></label>
+          <label class="lsf" title="Re-entry window: how much of the way from where it enters back to the mean still counts as an entry, in %. 50 with entry z 2.0 and back 0.5: enters between 1.50 and 0.75, and past 0.75 the side disarms - so nothing near the mean is ever an entry. 100 = all the way to the mean.">
+            <span>Re-entry window %</span>
+            <input class="ls-az-reentry-window" type="number" min="5" max="100" step="5"></label>
+          <label class="lsf" title="No entry signal in the last this-many minutes before the session cutoff, or after it. 0 = off.">
+            <span>Cutoff (min)</span>
+            <input class="ls-az-buffer" type="number" min="0" step="1"></label>
+          <label class="lsf" title="No new entry signal for this long after an exit signal or a close.">
+            <span>Cooldown (min)</span>
+            <input class="ls-az-cooldown" type="number" min="0" step="1"></label>
+          <label class="lsf" title="No entry until the Algo has watched this many minutes of LIVE prices since it was turned on — even when MT5's history fills the band at once. Time with no price does not count. Signals counts: warm up in Signals, then switch to LIVE. 0 = off.">
+            <span>Warm-up (min)</span>
+            <input class="ls-az-warmup" type="number" min="0" step="1"></label>
+          <label class="lsf check-row" title="Also signal EXIT if the spread runs against the position to this |z|.">
+            <span>Z-stop at</span>
+            <input type="checkbox" class="ls-az-stop-on">
+            <input class="ls-az-stop" type="number" min="0" step="0.1"></label>
+          <label class="lsf check-row" title="Also signal EXIT when z crosses back through 0 while the position is at or above break-even after costs.">
+            <span>Back to mean</span>
+            <input type="checkbox" class="ls-az-revert-on"></label>
+          <label class="lsf" title="One Algo trade, in spreads: 1 = this ladder&#8217;s Leg A lots / Leg B lots. Its own number — the keypad does not change it.">
+            <span>Algo qty</span>
+            <input class="ls-az-qty" type="number" min="0.01" step="0.01"></label>
+          <label class="lsf" title="Entries stop for the rest of the day after this many Algo trades. 0 = no limit.">
+            <span>Max trades/day</span>
+            <input class="ls-az-maxtrades" type="number" min="0" step="1"></label>
+          <label class="lsf" title="Entries stop for the day when the Algo&#8217;s P&amp;L today (closed + open) reaches minus this. 0 = off.">
+            <span>Daily loss limit</span>
+            <input class="ls-az-loss" type="number" min="0" step="1"></label>
+          <label class="lsf" title="Entries stop for the day after this many losing Algo trades in a row. 0 = off.">
+            <span>Losses in a row</span>
+            <input class="ls-az-losses" type="number" min="0" step="1"></label>
+          <label class="lsf check-row" title="Edge filter: no entry unless the expected capture (capture fraction x |z| x sigma, in money) is at least this many times the round-trip cost — crossing + commission + slippage.">
+            <span>Edge filter &#215;</span>
+            <input type="checkbox" class="ls-az-edge-on">
+            <input class="ls-az-edge" type="number" min="0" step="0.1"></label>
+          <label class="lsf" title="How much of the full reversion (|z| x sigma) a trade is expected to capture. 0.5 = half.">
+            <span>Capture fraction</span>
+            <input class="ls-az-capture" type="number" min="0.05" max="1" step="0.05"></label>
+          <label class="lsf check-row" title="No entry while the spread is TRENDING: a high efficiency ratio and few crossings of its mean.">
+            <span>Regime filter</span>
+            <input type="checkbox" class="ls-az-regime-on"></label>
+          <label class="lsf check-row" title="Trend direction: when the band's middle has moved more than this many sigma over the lookback, no entry AGAINST it — no H to L while it rises, no L to H while it falls. The other side stays open.">
+            <span>Trend filter (σ)</span>
+            <input type="checkbox" class="ls-az-trend-on">
+            <input class="ls-az-trend" type="number" min="0.1" step="0.1"></label>
+          <label class="lsf" title="How far back the trend filter measures the middle's move, in minutes.">
+            <span>Trend lookback (min)</span>
+            <input class="ls-az-trend-look" type="number" min="15" step="15"></label>
+          <label class="lsf" title="No entry when the spread reverts faster than this (minutes) — noise. 0 = off.">
+            <span>Half-life min (min)</span>
+            <input class="ls-az-hl-min" type="number" min="0" step="1"></label>
+          <label class="lsf" title="No entry when the spread reverts slower than this (minutes) — it will not revert inside a hold. 0 = off.">
+            <span>Half-life max (min)</span>
+            <input class="ls-az-hl-max" type="number" min="0" step="1"></label>
+          <label class="lsf check-row" title="Signal EXIT when the position falls to break-even less this % of the margin one spread ties up — the mirror of TP % of margin.">
+            <span>SL % margin</span>
+            <input type="checkbox" class="ls-az-sl-on">
+            <input class="ls-az-sl" type="number" min="0" step="0.1"></label>
+          <!-- HOW THE STOP AND THE TARGET ARE SIZED. A % of margin is the
+               same distance on a quiet day and a wild one; an ATR stop
+               sizes itself to the market. Measured from break-even and
+               frozen when the trade opens, either way. -->
+          <label class="lsf" title="How the stop loss is sized. % of margin: the SL % margin above. ATR: a multiple of the spread's average true range (close to close, on the Algo's candles) - wider when the spread is busy, tighter when it is quiet. Frozen when the trade opens.">
+            <span>Stop sized by</span>
+            <select class="ls-az-stop-mode">
+              <option value="MARGIN">% of margin</option>
+              <option value="ATR">ATR</option>
+            </select></label>
+          <label class="lsf" title="How the take-profit is sized. % of margin: this ladder's TP % of margin. ATR: a multiple of the spread's ATR. Frozen when the trade opens.">
+            <span>Target sized by</span>
+            <select class="ls-az-target-mode">
+              <option value="MARGIN">% of margin</option>
+              <option value="ATR">ATR</option>
+            </select></label>
+          <label class="lsf" title="How many candles the ATR averages over - 14 is the usual, 21 is slower and steadier. The Algo takes no entry in ATR mode until it has this many closed candles plus one.">
+            <span>ATR period (candles)</span>
+            <input class="ls-az-atr-period" type="number" min="2" step="1"></label>
+          <label class="lsf" title="Stop loss = break-even less this many ATRs (ATR mode). 2.0 is the usual start.">
+            <span>Stop x ATR</span>
+            <input class="ls-az-atr-stop" type="number" min="0.1" step="0.1"></label>
+          <label class="lsf" title="Take-profit = break-even plus this many ATRs (ATR mode).">
+            <span>Target x ATR</span>
+            <input class="ls-az-atr-target" type="number" min="0.1" step="0.1"></label>
+          <!-- EACH SIDE'S OWN EXITS. Blank is the ladder's own value
+               above; a trade keeps the levels it was given when it
+               opened. -->
+          <div class="lsf-side-note hint">Per side - H to L | L to H. Blank uses the value above.</div>
+          <label class="lsf side-pair" title="Stop sized by for H to L (left) and L to H (right). Blank = the ladder&#39;s own.">
+            <span>SL by</span>
+            <select class="ls-az-stop-mode-sell" title="blank = the ladder&#39;s own"><option value="">same</option><option value="MARGIN">%</option><option value="ATR">ATR</option></select>
+            <select class="ls-az-stop-mode-buy" title="blank = the ladder&#39;s own"><option value="">same</option><option value="MARGIN">%</option><option value="ATR">ATR</option></select></label>
+          <label class="lsf side-pair" title="Target sized by for H to L (left) and L to H (right). Blank = the ladder&#39;s own.">
+            <span>TP by</span>
+            <select class="ls-az-target-mode-sell" title="blank = the ladder&#39;s own"><option value="">same</option><option value="MARGIN">%</option><option value="ATR">ATR</option></select>
+            <select class="ls-az-target-mode-buy" title="blank = the ladder&#39;s own"><option value="">same</option><option value="MARGIN">%</option><option value="ATR">ATR</option></select></label>
+          <label class="lsf side-pair" title="SL % margin for H to L (left) and L to H (right). Blank = the ladder&#39;s own.">
+            <span>SL %</span>
+            <input class="ls-az-sl-sell" type="number" min="0" step="0.1" placeholder="H to L">
+            <input class="ls-az-sl-buy" type="number" min="0" step="0.1" placeholder="L to H"></label>
+          <label class="lsf side-pair" title="TP % margin for H to L (left) and L to H (right). Blank = the ladder&#39;s own.">
+            <span>TP %</span>
+            <input class="ls-az-tp-sell" type="number" min="0" step="0.1" placeholder="H to L">
+            <input class="ls-az-tp-buy" type="number" min="0" step="0.1" placeholder="L to H"></label>
+          <label class="lsf side-pair" title="Stop x ATR for H to L (left) and L to H (right). Blank = the ladder&#39;s own.">
+            <span>SL ATR</span>
+            <input class="ls-az-atr-stop-sell" type="number" min="0" step="0.1" placeholder="H to L">
+            <input class="ls-az-atr-stop-buy" type="number" min="0" step="0.1" placeholder="L to H"></label>
+          <label class="lsf side-pair" title="Target x ATR for H to L (left) and L to H (right). Blank = the ladder&#39;s own.">
+            <span>TP ATR</span>
+            <input class="ls-az-atr-target-sell" type="number" min="0" step="0.1" placeholder="H to L">
+            <input class="ls-az-atr-target-buy" type="number" min="0" step="0.1" placeholder="L to H"></label>
+          <label class="lsf check-row" title="While a position is on: a bar from the stop loss to the take-profit, with the entry marked and the closing price on it.">
+            <span>Progress bar</span>
+            <input type="checkbox" class="ls-az-progress"></label>
+          <label class="lsf check-row" title="Also signal EXIT after the position has been on this many candles, whatever its P&amp;L.">
+            <span>Time stop</span>
+            <input type="checkbox" class="ls-az-time-on">
+            <input class="ls-az-time" type="number" min="1" step="1"></label>
+          <div class="lsf-note hint">Signals: the Algo signals, you trade —
+            nothing is sent, clicks on the ladder work, and your position
+            gets the Algo's TP and SL as alerts. LIVE: the Algo
+            trades this ladder (MARKET in, closes by ticket) and manual
+            orders on it are OFF; closes still work. Off again after a
+            restart.</div>
         </div>
       </div>
       <div class="ls-actions">

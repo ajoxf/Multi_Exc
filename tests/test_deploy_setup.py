@@ -647,12 +647,45 @@ def test_control_an_attaching_account_still_needs_a_terminal(tmp_path):
     assert ok_now
 
 
-def test_a_terminal_folder_that_is_not_there_is_refused(tmp_path):
+def test_a_terminal_that_is_not_there_opens_the_screen_and_holds_the_engine(
+        tmp_path):
+    """A wrong MetaTrader path is fixed on the Exchanges page, so the
+    screen must open to fix it on. The engine is held, with the reason,
+    until the path is right."""
+    import start
     raw = _configured(tmp_path, **{
         NAME_B: {'terminal_path': str(tmp_path / 'gone' / 'terminal64.exe')}})
     ok, lines = preflight.check(raw, terminals_running=2)
-    assert not ok
-    assert 'no file there' in lines[0]
+    assert ok, lines
+    assert any('no MetaTrader 5 at' in line and 'Exchanges page' in line
+               for line in lines)
+    path = tmp_path / 'config.json'
+    path.write_text(json.dumps(raw), encoding='utf-8')
+    problems = start.check_config(str(path))
+    assert any(NAME_B in p and 'no MetaTrader 5 at' in p for p in problems)
+
+
+def test_control_a_terminal_that_is_there_holds_nothing(tmp_path):
+    import start
+    raw = _configured(tmp_path)
+    ok, lines = preflight.check(raw, terminals_running=2)
+    assert ok
+    assert not any('no MetaTrader 5 at' in line for line in lines)
+    path = tmp_path / 'config.json'
+    path.write_text(json.dumps(raw), encoding='utf-8')
+    assert start.check_config(str(path)) == []
+
+
+def test_a_path_pasted_with_quotes_is_the_same_path(tmp_path):
+    """Windows' "Copy as path" pastes "C:\\...\\terminal64.exe" WITH the
+    quotes. That stopped a desk from starting with the file right there."""
+    raw = _configured(tmp_path)
+    for name in (NAME_A, NAME_B):
+        path = raw['accounts'][name]['terminal_path']
+        raw['accounts'][name]['terminal_path'] = f'"{path}"'
+    ok, lines = preflight.check(raw, terminals_running=0)
+    assert ok, lines
+    assert not any('no MetaTrader 5 at' in line for line in lines)
 
 
 @pytest.mark.parametrize('field,value', [

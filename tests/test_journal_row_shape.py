@@ -206,3 +206,31 @@ def test_a_partial_total_says_how_many_fills_it_covers(tmp_path):
     assert totals['fills'] == 2
     assert totals['commission'] == pytest.approx(-7.0)
     assert totals['commission_measured'] == 1
+
+
+# -- what the totals cover ----------------------------------------------------
+
+
+def test_the_totals_say_their_stretch_and_split_by_account(tmp_path):
+    """The header's "broker's own P&L" is EVERY fill in the journal - all
+    days, every account the desk has ever been connected to. It now says
+    which stretch that is, and what each account contributed."""
+    store = store_with(tmp_path, real_order_log(
+        [FakeDeal(1, None, None, profit=-1500.0)]))
+    store.record_fills('AC-100018', real_order_log(
+        [FakeDeal(2, None, None, profit=-16.05)]))
+    totals = store.fill_totals()
+    assert totals['profit'] == pytest.approx(-1516.05)
+    assert totals['first_ms'] and totals['last_ms']
+    by = {a['account']: a['profit'] for a in totals['by_account']}
+    assert by == {'AC-10006': pytest.approx(-1500.0),
+                  'AC-100018': pytest.approx(-16.05)}
+
+
+def test_ours_only_totals_leave_out_the_terminals_own_clicks(tmp_path):
+    store = store_with(tmp_path, real_order_log(
+        [FakeDeal(1, None, None, profit=10.0),
+         FakeDeal(2, None, None, profit=-500.0, magic=0)]))   # by hand
+    assert store.fill_totals()['profit'] == pytest.approx(-490.0)
+    # The CONTROL is the line above: without the filter it is all in.
+    assert store.fill_totals(ours_only=True)['profit'] == pytest.approx(10.0)

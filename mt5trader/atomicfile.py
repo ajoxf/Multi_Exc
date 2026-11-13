@@ -79,8 +79,20 @@ def replace(tmp, path, attempts=ATTEMPTS, delay=DELAY_SEC, sleep=time.sleep):
             last = e
             if attempt + 1 < attempts:
                 sleep(delay)
-    logging.error('could not replace %s (%s). The file on disk is the '
-                  'PREVIOUS one — nothing was half-written.', path, last)
+    # WARNING, not ERROR, and the distinction is the point of this
+    # module. Reaching here is the designed fallback working: the
+    # previous file is intact, the next poll publishes over it, and one
+    # snapshot a cycle old is far inside the staleness threshold the
+    # screen warns at. On a live desk this fires a few times an hour
+    # against several thousand publishes — an antivirus scanner holding
+    # the file for longer than a reader does — and logging that at
+    # ERROR teaches a trader to ignore the level that means their money
+    # is at risk.
+    logging.warning('could not replace %s (%s). The file on disk is the '
+                    'PREVIOUS one — nothing was half-written, and the next '
+                    'publish writes over it. Frequent on this file means '
+                    'something outside this system is holding it open, '
+                    'usually a virus scanner.', path, last)
     return False
 
 
