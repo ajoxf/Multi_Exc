@@ -636,7 +636,9 @@ def check_pair(checklist, pair, report_a, report_b,
              pair.symbol_a),
             (getattr(pair, 'contract_size_b', None), report_b, 'B',
              pair.symbol_b)):
-        theirs = report.get('contract_size')
+        # In the leg's OWN units, which is what the override is in: a
+        # converted leg's `contract_size` is per converted unit.
+        theirs = report.get('contract_size_raw', report.get('contract_size'))
         if override and theirs and abs(float(override) - theirs) > 1e-9:
             checklist.add(
                 scope, f'Leg {role} contract size', WARN,

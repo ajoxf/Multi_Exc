@@ -83,3 +83,6 @@ backtest_results/
 *.swp
 .DS_Store
 Thumbs.db
+
+# tools/demo.py writes its simulated run here
+demo-run/

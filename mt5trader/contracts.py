@@ -110,6 +110,42 @@ def factor_steps(from_unit, to_unit):
         f'unit factor = {factor:.10g}']}
 
 
+def contract_from_lot(quantity, lot_unit, price_unit):
+    """A contract size worked out from what one lot IS and what the price
+    is quoted per, with the working:
+
+        one lot = 5 kg = 5000 g
+        priced per kg = 1000 g
+        contract size = 5000 / 1000 = 5 per lot
+
+    `lot_unit` blank means the quantity already IS the contract size, in
+    price units, and is returned as it is. None when the quantity is
+    not a positive number or the two units do not convert.
+    """
+    try:
+        quantity = float(quantity)
+    except (TypeError, ValueError):
+        return None
+    if not quantity > 0:
+        return None
+    if not lot_unit:
+        return {'contract_size': quantity, 'steps': [
+            f'contract size = {quantity:g} per lot, as typed']}
+    a = UNITS.get(_unit(lot_unit))
+    b = UNITS.get(_unit(price_unit))
+    if a is None or b is None or a[0] != b[0]:
+        return {'contract_size': None, 'steps': [
+            f'a lot in {lot_unit} cannot be counted in {price_unit or "?"} — '
+            f'pick the unit the price is quoted per first']}
+    base = _BASE_NAMES[a[0]]
+    size = quantity * a[1] / b[1]
+    return {'contract_size': size, 'steps': [
+        f'one lot = {quantity:g} {lot_unit} = {quantity * a[1]:.10g} {base}',
+        f'priced per {price_unit} = {b[1]:.10g} {base}',
+        f'contract size = {quantity * a[1]:.10g} / {b[1]:.10g} = '
+        f'{size:.10g} per lot']}
+
+
 def unit_factor(from_unit, to_unit):
     """What to multiply a price PER `from_unit` by to get the price PER
     `to_unit`. None when the two cannot be compared.

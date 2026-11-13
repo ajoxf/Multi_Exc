@@ -5091,3 +5091,25 @@ def test_money_is_written_in_the_pairs_own_currency(page):
     assert page.evaluate("MT5Trader.money(1234.5, 'INR')") == '₹1,234.50'
     assert page.evaluate("MT5Trader.money(-5, 'USD')") == '-$5.00'
     assert page.evaluate("MT5Trader.money(7, 'AED')") == 'AED 7.00'
+
+
+def test_a_lot_typed_on_the_pair_form_shows_its_contract_size_at_once(page):
+    """While the cursor is still in the field — the section is never
+    repainted under a focused input, so the working is updated in place."""
+    page.click('#open-settings')
+    page.wait_for_selector('.window.settings .new-pair', timeout=WAIT)
+    page.click('.window.settings .new-pair')
+    page.wait_for_selector('.p-unit-b', timeout=WAIT)
+    page.wait_for_function(
+        "document.querySelectorAll('.p-unit-b option').length > 3",
+        timeout=WAIT)
+    page.select_option('.p-unit-b', 'kg')
+    page.select_option('.p-lotunit-b', 'kg')
+    page.fill('.p-lotqty-b', '5')
+    page.wait_for_function(
+        "(document.querySelector('.contract-working-b') || {}).textContent"
+        " && document.querySelector('.contract-working-b').textContent"
+        ".indexOf('= 5 per lot') >= 0", timeout=WAIT)
+    assert page.evaluate("document.activeElement.className") == 'p-lotqty-b'
+    page.click('.window.settings .cancel-pair')
+    page.click('.window.settings .close')

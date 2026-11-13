@@ -119,6 +119,11 @@
     });
     panel.addEventListener('click', onClick);
     panel.addEventListener('change', onChange);
+    // ...and as each key goes in, so a lot typed is a contract size
+    // seen before the field is left.
+    panel.addEventListener('input', function (e) {
+      if (e.target.closest('.pair-form')) { readDraft(); refreshWorking(); }
+    });
     // A click is mousedown AND mouseup on the SAME element. Replace
     // that element in between — which the connection poll does every
     // five seconds, wholesale, with `innerHTML =` — and the browser
@@ -816,6 +821,8 @@
                   '<div class="hint">MCX gold is quoted per 10 g, MCX ' +
                   'silver per kg, MCX crude per barrel.</div>');
     html += field('Unit factor', factorControl(draft, suggestion));
+    html += field('Leg A contract (override)', contractControl(draft, 'a'));
+    html += field('Leg B contract (override)', contractControl(draft, 'b'));
     html += field('Pair type',
                   '<select class="p-type">' +
                   option('SPOT_FUTURE', draft.pair_type) +
@@ -987,7 +994,17 @@
                          isNaN(factor) ? '' : factor) + '"' +
       (custom ? ' placeholder="blank = 1"'
               : ' readonly title="computed from the two units"') + '>';
-    html += '<div class="factor-working">';
+    return html + '<div class="factor-working unit-working">' +
+      unitWorking(draft, suggestion) + '</div>';
+  }
+
+  function unitWorking(draft, suggestion) {
+    var custom = draft.leg_a_unit === 'custom' ||
+      draft.leg_b_unit === 'custom' || !draft.leg_a_unit ||
+      !draft.leg_b_unit;
+    var worked = custom ? null : factorSteps(draft.leg_a_unit,
+                                             draft.leg_b_unit);
+    var html = '';
     if (worked) {
       html += '<ol>' + worked.steps.map(function (step) {
         return '<li>' + escape(step) + '</li>';
@@ -1009,7 +1026,126 @@
         escape(suggestion.unit_a || '') + ' → ' +
         escape(suggestion.unit_b || '') + '</button></div>';
     }
-    return html + '</div>';
+    return html;
+  }
+
+  function lotUnitSelect(cls, selected) {
+    var html = '<select class="' + cls + '"><option value="">' +
+      'price units — type the contract size</option>';
+    (local.units || []).forEach(function (unit) {
+      html += '<option value="' + escape(unit.key) + '"' +
+        (unit.key === selected ? ' selected' : '') + '>' +
+        escape(unit.label) + '</option>';
+    });
+    return html + '</select>';
+  }
+
+  function contractSteps(qty, lotUnit, priceUnit) {
+    /* The same working as the server's contracts.contract_from_lot. */
+    if (!(qty > 0)) { return null; }
+    if (!lotUnit) {
+      return {size: qty, steps: ['contract size = ' + qty +
+        ' per lot, as typed']};
+    }
+    var a = unitOf(lotUnit), b = unitOf(priceUnit);
+    if (!a || !b || a.dimension !== b.dimension) {
+      return {size: null, steps: ['a lot in ' + lotUnit + ' cannot be ' +
+        'counted in ' + (priceUnit && priceUnit !== 'custom'
+          ? priceUnit : 'a price unit nobody picked') +
+        ' — pick the "priced per" unit above first']};
+    }
+    var size = qty * a.size / b.size;
+    return {size: size, steps: [
+      'one lot = ' + qty + ' ' + a.key + ' = ' +
+        +(qty * a.size).toPrecision(10) + ' ' + a.base,
+      'priced per ' + b.key + ' = ' + b.size + ' ' + b.base,
+      'contract size = ' + +(qty * a.size).toPrecision(10) + ' ÷ ' +
+        b.size + ' = ' + +size.toPrecision(10) + ' per lot']};
+  }
+
+  function contractControl(draft, leg) {
+    /* What ONE LOT is, typed only when the broker's own figure is wrong.
+     * Blank is the normal case: the broker's number is used, and the
+     * exchange's spec is shown beside it to check against. */
+    var qty = draft['leg_' + leg + '_lotqty'];
+    var lotUnit = draft['leg_' + leg + '_lotunit'] || '';
+    var priceUnit = draft['leg_' + leg + '_unit'];
+    var html = '<input class="p-lotqty-' + leg +
+      '" type="number" min="0" step="any" placeholder="one lot — blank = ' +
+      'the broker\'s" value="' + escape(qty === null || qty === undefined ||
+                                      isNaN(qty) ? '' : qty) + '">' +
+      lotUnitSelect('p-lotunit-' + leg, lotUnit);
+    return html + '<div class="factor-working contract-working-' + leg +
+      '">' + contractWorking(draft, leg) + '</div>';
+  }
+
+  function contractWorking(draft, leg) {
+    var qty = draft['leg_' + leg + '_lotqty'];
+    var lotUnit = draft['leg_' + leg + '_lotunit'] || '';
+    var priceUnit = draft['leg_' + leg + '_unit'];
+    var worked = contractSteps(parseFloat(qty), lotUnit, priceUnit);
+    var html = '';
+    if (worked) {
+      html += '<ol>' + worked.steps.map(function (step) {
+        return '<li>' + escape(step) + '</li>';
+      }).join('') + '</ol>';
+      if (worked.size !== null) {
+        html += '<div class="worked override">OVERRIDE: every money ' +
+          'figure on this ladder uses <b>' + +worked.size.toPrecision(10) +
+          '</b> per lot for leg ' + leg.toUpperCase() + '</div>';
+      }
+    }
+    // What to check it against: the broker's figure, in the leg's own
+    // units, and the exchange's published lot.
+    var derived = local.derived || {};
+    var spec = (derived.specs || {})[leg] || {};
+    var broker = spec.contract_size_raw !== undefined &&
+      spec.contract_size_raw !== null ? spec.contract_size_raw
+      : spec.contract_size;
+    var exchange = derived['spec_' + leg];
+    html += '<div class="hint">' +
+      (broker === undefined || broker === null
+        ? 'broker: ' + DASH + ' (press Read both legs)'
+        : 'broker says ' + escape(broker) + ' per lot') +
+      (exchange ? ' · ' + escape(exchange.description) + ' spec: ' +
+        escape(exchange.lot_quantity) + ' ' + escape(exchange.lot_unit) +
+        ' priced per ' + escape(exchange.quote_unit) + ' = ' +
+        escape(+Number(exchange.contract_size).toPrecision(10)) : '') +
+      (exchange && broker && Math.abs(broker - exchange.contract_size) >
+        1e-6 * exchange.contract_size
+        ? ' <b class="problem-text">— they disagree</b>' : '') +
+      '</div>';
+    return html;
+  }
+
+  function refreshWorking() {
+    /* The calculations, redrawn IN PLACE as the operator types or picks:
+     * the section itself is never repainted while a field has focus
+     * (that would eat what is being typed), so the working boxes are
+     * the only thing replaced. */
+    var form = document.querySelector('.pair-form');
+    if (!form) { return; }
+    var draft = local.draft;
+    var suggestion = (local.derived || {}).conversion_suggestion;
+    var box = form.querySelector('.unit-working');
+    if (box) { box.innerHTML = unitWorking(draft, suggestion); }
+    var factorInput = form.querySelector('.p-factor-a');
+    var custom = draft.leg_a_unit === 'custom' ||
+      draft.leg_b_unit === 'custom' || !draft.leg_a_unit ||
+      !draft.leg_b_unit;
+    if (factorInput) {
+      var worked = custom ? null : factorSteps(draft.leg_a_unit,
+                                               draft.leg_b_unit);
+      factorInput.readOnly = !custom;
+      if (worked && worked.factor !== null) {
+        factorInput.value = worked.factor;
+        draft.leg_a_factor = worked.factor;
+      }
+    }
+    ['a', 'b'].forEach(function (leg) {
+      var target = form.querySelector('.contract-working-' + leg);
+      if (target) { target.innerHTML = contractWorking(draft, leg); }
+    });
   }
 
   function workedExample(draft, factor) {
@@ -1090,13 +1226,9 @@
   function onChange(e) {
     if (e.target.closest('.pair-form')) {
       readDraft();
-      // A unit picked is a factor worked out: redraw so the working
-      // and the example follow the choice at once.
-      if (e.target.classList.contains('p-unit-a') ||
-          e.target.classList.contains('p-unit-b') ||
-          e.target.classList.contains('p-fx-a')) {
-        render(false);
-      }
+      // A unit picked is a factor worked out: the working and the
+      // example follow the choice at once.
+      refreshWorking();
     }
     if (e.target.classList.contains('f-kind')) {
       kindClass(e.target.closest('tr'));
@@ -1209,6 +1341,12 @@
         leg_b_symbol: (pair.leg_b || {}).symbol,
         leg_a_fx: (pair.leg_a || {}).fx || '',
         leg_a_factor: (pair.leg_a || {}).price_factor,
+        leg_a_lotqty: (pair.leg_a || {}).lot_quantity !== undefined
+          ? (pair.leg_a || {}).lot_quantity : pair.contract_size_a,
+        leg_a_lotunit: (pair.leg_a || {}).lot_unit || '',
+        leg_b_lotqty: (pair.leg_b || {}).lot_quantity !== undefined
+          ? (pair.leg_b || {}).lot_quantity : pair.contract_size_b,
+        leg_b_lotunit: (pair.leg_b || {}).lot_unit || '',
         leg_a_unit: (pair.leg_a || {}).price_unit ||
           ((pair.leg_a || {}).price_factor ? 'custom' : ''),
         leg_b_unit: (pair.leg_b || {}).price_unit ||
@@ -1412,6 +1550,12 @@
       leg_a_fx: value('.p-fx-a').toUpperCase(),
       leg_a_unit: value('.p-unit-a'),
       leg_b_unit: value('.p-unit-b'),
+      leg_a_lotqty: value('.p-lotqty-a') === ''
+        ? null : parseFloat(value('.p-lotqty-a')),
+      leg_a_lotunit: value('.p-lotunit-a'),
+      leg_b_lotqty: value('.p-lotqty-b') === ''
+        ? null : parseFloat(value('.p-lotqty-b')),
+      leg_b_lotunit: value('.p-lotunit-b'),
       leg_a_factor: value('.p-factor-a') === ''
         ? null : parseFloat(value('.p-factor-a')),
       expiry: value('.p-expiry') || null
@@ -1447,12 +1591,20 @@
       leg_a: {account: draft.leg_a_account, symbol: draft.leg_a_symbol,
               fx: draft.leg_a_fx || '',
               price_unit: draft.leg_a_unit || '',
+              lot_quantity: draft.leg_a_lotqty === null ||
+                draft.leg_a_lotqty === undefined ||
+                isNaN(draft.leg_a_lotqty) ? '' : draft.leg_a_lotqty,
+              lot_unit: draft.leg_a_lotunit || '',
               price_factor: (draft.leg_a_factor === null ||
                              draft.leg_a_factor === undefined ||
                              isNaN(draft.leg_a_factor))
                 ? '' : draft.leg_a_factor},
       leg_b: {account: draft.leg_b_account, symbol: draft.leg_b_symbol,
-              price_unit: draft.leg_b_unit || ''},
+              price_unit: draft.leg_b_unit || '',
+              lot_quantity: draft.leg_b_lotqty === null ||
+                draft.leg_b_lotqty === undefined ||
+                isNaN(draft.leg_b_lotqty) ? '' : draft.leg_b_lotqty,
+              lot_unit: draft.leg_b_lotunit || ''},
       pair_type: draft.pair_type,
       hedge_ratio: draft.hedge_ratio,
       increment: draft.increment,

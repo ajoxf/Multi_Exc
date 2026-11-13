@@ -2002,3 +2002,10 @@ table.grid-form select.f-kind { min-width: 96px; }
 .titlebar .title, .titlebar .route { min-width: 0; flex-shrink: 1; }
 .titlebar .mode-badge { flex-shrink: 0; }
 .cross-strip { border-bottom: 1px solid #ddd; }
+.pair-form .factor-working .worked.override { background: #fff4d6; border-color: #e0c27a; }
+/* The contract override: quantity, then its unit on a line of its own,
+   so neither is cut short in a quarter-width field. */
+.pair-form input.p-lotqty-a, .pair-form input.p-lotqty-b,
+.pair-form select.p-lotunit-a, .pair-form select.p-lotunit-b {
+  display: block; width: 100%; box-sizing: border-box; }
+.pair-form select.p-lotunit-a, .pair-form select.p-lotunit-b { margin-top: 2px; }

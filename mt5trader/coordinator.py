@@ -384,8 +384,21 @@ class Coordinator:
                 override = (pair.contract_size_a if leg_key == 'a'
                             else pair.contract_size_b)
                 meta['contract_size_mt5'] = meta.get('contract_size')
+                raw = report.get('contract_size_raw')
+                meta['contract_size_raw'] = raw
                 if override:
-                    meta['contract_size'] = float(override)
+                    # The override is in the leg's OWN units — 100 oz of
+                    # COMEX gold, as its field says. A converted leg's
+                    # engine figure is per CONVERTED unit (311.03 lots of
+                    # 10 g), so the override goes through the same ratio
+                    # the broker's figure did. Applied as typed, it made
+                    # a gold leg's money 3.1x too small.
+                    if raw and meta.get('contract_size'):
+                        meta['contract_size'] = (float(override)
+                                                 * meta['contract_size']
+                                                 / float(raw))
+                    else:
+                        meta['contract_size'] = float(override)
                 setattr(pair, meta_attr, meta)
             self.errors[key] = problems
             if not problems:

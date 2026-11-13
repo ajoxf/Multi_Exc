@@ -147,3 +147,47 @@ def test_the_working_is_served_step_by_step(client):
     assert body['steps'][0] == 'Leg A is priced per oz = 31.1034768 g'
     keys = [u['key'] for u in client.get('/api/units').get_json()['units']]
     assert {'oz', '10g', 'kg', 'bbl', 'lb'} <= set(keys)
+
+
+def test_a_lot_typed_on_the_pair_form_becomes_the_contract_size(client,
+                                                                paths):
+    reply = post(client, '/api/pairs/SIH7|SILVERM', {
+        'leg_a': {'account': 'cme', 'symbol': 'SIH7', 'price_unit': 'oz'},
+        'leg_b': {'account': 'mcx', 'symbol': 'SILVERM27FEB27FUT',
+                  'price_unit': 'kg', 'lot_quantity': 5, 'lot_unit': 'kg'}})
+    assert reply.status_code == 200, reply.get_json()
+    pair = cfg.load_raw(paths['config'])['pairs']['SIH7|SILVERM']
+    assert pair['contract_size_b'] == 5.0
+    assert pair['leg_b']['lot_quantity'] == 5.0
+    assert pair['leg_b']['lot_unit'] == 'kg'
+
+
+def test_control_a_blank_lot_clears_the_override(client, paths):
+    post(client, '/api/pairs/SIH7|SILVERM', {
+        'leg_b': {'account': 'mcx', 'symbol': 'S', 'price_unit': 'kg',
+                  'lot_quantity': 5, 'lot_unit': 'kg'}})
+    post(client, '/api/pairs/SIH7|SILVERM', {
+        'leg_b': {'account': 'mcx', 'symbol': 'S', 'price_unit': 'kg',
+                  'lot_quantity': '', 'lot_unit': ''}})
+    pair = cfg.load_raw(paths['config'])['pairs']['SIH7|SILVERM']
+    assert pair['contract_size_b'] is None
+    assert 'lot_quantity' not in pair['leg_b']
+
+
+def test_a_lot_in_a_unit_the_price_is_not_counted_in_is_refused(client):
+    reply = post(client, '/api/pairs/X|Y', {
+        'leg_b': {'account': 'mcx', 'symbol': 'Y', 'price_unit': 'bbl',
+                  'lot_quantity': 5, 'lot_unit': 'kg'}})
+    assert reply.status_code == 400
+    assert 'cannot be counted' in reply.get_json()['error']
+
+
+def test_a_contract_set_on_the_ladder_drops_the_lot_it_came_from(client,
+                                                                  paths):
+    post(client, '/api/pairs/SIH7|SILVERM', {
+        'leg_b': {'account': 'mcx', 'symbol': 'S', 'price_unit': 'kg',
+                  'lot_quantity': 5, 'lot_unit': 'kg'}})
+    post(client, '/api/pairs/SIH7|SILVERM', {'contract_size_b': 6})
+    pair = cfg.load_raw(paths['config'])['pairs']['SIH7|SILVERM']
+    assert pair['contract_size_b'] == 6
+    assert 'lot_quantity' not in pair['leg_b']

@@ -75,6 +75,24 @@ future if you need to; this terminal shows it rather than hiding it.
   leaves the other unhedged. An expired leg is a red alert. MCX and CME
   contracts of the "same" month expire on different days.
 
+### Live charts
+
+Each ladder has a live chart window, as arrow-statarb does: the spread
+with its executable bid/offer and mean ±2σ, its z-score against the last
+5 minutes, and both legs in the same money. Open or close it with the
+📈 button on the ladder, the **+** menu, or the chart's own ✕. A picture
+only — nothing reads it to decide anything.
+
+### Units and contract sizes on the pair form
+
+"Leg A priced per" and "Leg B priced per" are dropdowns, and the unit
+factor is worked out from them on screen. Each leg also has a contract
+override — a lot quantity and its unit, e.g. "5 kg, priced per kg = 5"
+— worked out the same way. Blank uses the broker's figure; the
+exchange's published lot is shown beside it to check against. An
+override is always in the leg's OWN units (100 oz for a COMEX gold
+lot); the engine converts it for a converted leg.
+
 ### The Arrow leg
 
 * **Arrow is a netting account; the engine needs tickets.** Every order is
@@ -108,6 +126,10 @@ future if you need to; this terminal shows it rather than hiding it.
 > If a build answers prices in paise, set `price_divisor: 100` on the account.
 
 ### Setting it up
+
+Every command for a new machine — install, tests, a no-broker demo
+(`python tools/demo.py`), first run and daily start — is in
+[docs/SETUP.md](docs/SETUP.md).
 
 1. **Exchanges → accounts**: add the MT5 account (kind *MT5*) and the Arrow
    account (kind *Arrow (MCX)*: app id, user id, password, API secret and the

@@ -1150,6 +1150,11 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                 (pair.get('leg_a') or {}).get('symbol'),
                 (pair.get('leg_b') or {}).get('symbol')),
             'conversion': specs['a'].get('conversion'),
+            'spec_a': (lambda s_: s_.to_dict() if s_ else None)(
+                contracts.spec_for((pair.get('leg_a') or {}).get('symbol'))),
+            'spec_b': (lambda s_: s_.to_dict() if s_ else None)(
+                contracts.spec_for((pair.get('leg_b') or {}).get('symbol'),
+                                   'MCX')),
             'unit_steps': contracts.factor_steps(
                 (pair.get('leg_a') or {}).get('price_unit'),
                 (pair.get('leg_b') or {}).get('price_unit')),
@@ -1228,7 +1233,8 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                     # factor it never showed.
                     merged = dict(pair.get(field) or {})
                     merged.update(payload[field])
-                    for k in ('fx', 'price_factor', 'price_unit'):
+                    for k in ('fx', 'price_factor', 'price_unit',
+                              'lot_quantity', 'lot_unit'):
                         if merged.get(k) in ('', None):
                             merged.pop(k, None)
                     pair[field] = merged
@@ -1249,9 +1255,39 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                     + ((steps or {}).get('steps') or
                        ['one of those is not a unit this knows'])[0])}), 400
             pair['leg_a']['price_factor'] = round(steps['factor'], 12)
+        # THE CONTRACT OVERRIDE, as a lot: "5 kg, priced per kg" is a
+        # contract size of 5, worked out here so the stored number always
+        # agrees with the quantity and units beside it. In the leg's OWN
+        # units; the engine converts a converted leg. A blank quantity
+        # clears the override and the broker's figure is used again.
+        for side, field in (('leg_a', 'contract_size_a'),
+                            ('leg_b', 'contract_size_b')):
+            sent = payload.get(side) if isinstance(payload.get(side),
+                                                   dict) else {}
+            if 'lot_quantity' not in sent:
+                if field in payload:
+                    # Set from the ladder's own field, as a number: the
+                    # lot it was once worked out from no longer applies.
+                    for k in ('lot_quantity', 'lot_unit'):
+                        (pair.get(side) or {}).pop(k, None)
+                continue
+            leg = pair.get(side) or {}
+            if sent.get('lot_quantity') in (None, ''):
+                pair[field] = None
+                continue
+            worked = contracts.contract_from_lot(
+                sent.get('lot_quantity'), sent.get('lot_unit'),
+                leg.get('price_unit'))
+            if worked is None or worked['contract_size'] is None:
+                return jsonify({'ok': False, 'error': (
+                    f"{side}: " + ((worked or {}).get('steps') or
+                                   ['the lot must be a positive number'])[0]
+                )}), 400
+            leg['lot_quantity'] = float(sent['lot_quantity'])
+            pair[field] = round(worked['contract_size'], 10)
         for side in ('leg_a', 'leg_b'):
             leg = pair.get(side) or {}
-            for k in ('price_unit',):
+            for k in ('price_unit', 'lot_quantity', 'lot_unit'):
                 if leg.get(k) in ('', None):
                     leg.pop(k, None)
             if leg.get('fx') is not None:

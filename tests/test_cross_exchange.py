@@ -400,3 +400,52 @@ def test_silver_100_is_its_own_contract_priced_per_ten_grams():
     for symbol, size in (('SILVER05MAR27FUT', 30.0), ('SILVERM27FEB27FUT', 5.0),
                          ('SILVERMIC27FEB27FUT', 1.0)):
         assert contracts.spec_for(symbol, 'MCX').contract_size == size
+
+
+def gold_engine(contract_size_a=None):
+    clock = Clock()
+    cme = FakeBroker('cme', [FakeSymbol('GCG7', 4000.0, 4000.5,
+                                        contract_size=100.0, volume_min=1.0,
+                                        volume_step=1.0)])
+    mcx = FakeBroker('mcx', [FakeSymbol('GOLD05FEB27FUT', 121000.0, 121020.0,
+                                        contract_size=100.0, volume_min=1.0,
+                                        volume_step=1.0)])
+    pair = PairConfig('GCG7|GOLD05FEB27FUT',
+                      leg_a={'account': 'cme', 'symbol': 'GCG7', 'fx': 'USDINR',
+                             'price_factor': 0.3215074657},
+                      leg_b={'account': 'mcx', 'symbol': 'GOLD05FEB27FUT'},
+                      contract_size_a=contract_size_a)
+    config = TraderConfig(pairs={pair.key: pair})
+    convs, _ = conversions_from_config(config)
+    book = FxBook(raw={'USDINR': manual_entry(88.0, clock=clock)}, clock=clock)
+    legs = {'cme': ConvertedLeg(FakeLeg(cme), convs['cme'], book),
+            'mcx': FakeLeg(mcx)}
+    coordinator = Coordinator(config, legs, sleep=lambda s: None)
+    coordinator.resolve_symbols()
+    return pair
+
+
+def test_a_contract_override_is_in_the_legs_OWN_units_and_is_converted():
+    """'100 oz' typed on a converted gold leg is 311.03 lots of 10 g to
+    the engine — applied as typed it made the leg's money 3.1x small."""
+    pair = gold_engine(contract_size_a=100.0)
+    assert pair.meta_a['contract_size'] == pytest.approx(311.034768)
+    # A broker that is genuinely wrong, corrected to 10 oz, scales too.
+    pair = gold_engine(contract_size_a=10.0)
+    assert pair.meta_a['contract_size'] == pytest.approx(31.1034768)
+
+
+def test_control_with_no_override_the_brokers_figure_is_used():
+    pair = gold_engine(contract_size_a=None)
+    assert pair.meta_a['contract_size'] == pytest.approx(311.034768)
+    assert pair.meta_a['contract_size_raw'] == 100.0
+
+
+def test_contract_from_lot_shows_its_working():
+    worked = contracts.contract_from_lot(5, 'kg', 'kg')
+    assert worked['contract_size'] == 5.0
+    assert worked['steps'][-1] == 'contract size = 5000 / 1000 = 5 per lot'
+    assert contracts.contract_from_lot(1, 'kg', '10g')['contract_size'] == 100
+    assert contracts.contract_from_lot(30, '', None)['contract_size'] == 30
+    assert contracts.contract_from_lot(1, 'kg', 'bbl')['contract_size'] is None
+    assert contracts.contract_from_lot(0, 'kg', 'kg') is None
