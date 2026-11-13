@@ -689,9 +689,18 @@ class Coordinator:
         fx = book.status(fx_name) if (book and fx_name) else None
         spec_a = contracts.spec_for(pair.symbol_a)
         spec_b = contracts.spec_for(pair.symbol_b, 'MCX')
-        match = contracts.lot_match(spec_a, spec_b, pair.clip_lots_a,
-                                    pair.clip_lots_b) \
-            if (spec_a and spec_b) else None
+        meta_a, meta_b = pair.meta_a or {}, pair.meta_b or {}
+        # What each leg's lot HOLDS, from the contract sizes this pair
+        # actually trades on (leg A in its own units, before conversion).
+        own_a = meta_a.get('contract_size')
+        if meta_a.get('contract_size_raw') and meta_a.get('contract_size') \
+                and meta_a.get('contract_size_mt5'):
+            own_a = (meta_a['contract_size'] * meta_a['contract_size_raw']
+                     / meta_a['contract_size_mt5'])
+        match = contracts.pair_quantities(
+            pair.leg_a, pair.leg_b, pair.symbol_a, pair.symbol_b,
+            own_a, meta_b.get('contract_size'),
+            pair.clip_lots_a, pair.clip_lots_b)
         watch = contracts.expiry_watch(
             pair.expiry_a or (pair.meta_a or {}).get('expiry'),
             pair.expiry or (pair.meta_b or {}).get('expiry'),

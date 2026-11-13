@@ -1158,10 +1158,14 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
             'unit_steps': contracts.factor_steps(
                 (pair.get('leg_a') or {}).get('price_unit'),
                 (pair.get('leg_b') or {}).get('price_unit')),
-            'lot_match': contracts.lot_match(
-                contracts.spec_for((pair.get('leg_a') or {}).get('symbol')),
-                contracts.spec_for((pair.get('leg_b') or {}).get('symbol'),
-                                   'MCX'), clip_a, clip_b),
+            'lot_match': contracts.pair_quantities(
+                pair.get('leg_a'), pair.get('leg_b'),
+                (pair.get('leg_a') or {}).get('symbol'),
+                (pair.get('leg_b') or {}).get('symbol'),
+                pair.get('contract_size_a') or specs['a'].get(
+                    'contract_size_raw', specs['a'].get('contract_size')),
+                pair.get('contract_size_b') or specs['b'].get(
+                    'contract_size'), clip_a, clip_b),
             'expiry_watch': contracts.expiry_watch(
                 pair.get('expiry_a') or specs['a'].get('expiry'),
                 pair.get('expiry') or specs['b'].get('expiry')),

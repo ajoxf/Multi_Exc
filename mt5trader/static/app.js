@@ -2562,7 +2562,7 @@
     var conv = cross.conversion;
     var watch = cross.expiry || {};
     var strip = node.querySelector('.cross-strip');
-    if (!conv && !(watch.warnings || []).length) {
+    if (!conv && !(watch.warnings || []).length && !cross.lot_match) {
       if (strip) { strip.remove(); }
       return;
     }
@@ -2579,7 +2579,11 @@
         node.insertBefore(strip, node.children[1] || null);
       }
     }
-    var parts = [];
+    // One LINE per subject — the rate, the quantity, the expiry — each
+    // tinted by its own state. One long line was cut off at the ladder's
+    // width, which hid exactly the warnings it was there to show.
+    var lines = [];
+    function add(text, level) { lines.push({text: text, level: level || ''}); }
     if (conv) {
       var rate = conv.fx
         ? conv.fx + ' ' + (conv.fx_rate === null || conv.fx_rate === undefined
@@ -2588,25 +2592,45 @@
             ? (conv.fx_source === 'symbol' ? ' live' : '')
             : ' (' + (conv.fx_age_sec / 3600).toFixed(1) + 'h old)')
         : 'no FX';
-      parts.push('A x ' + rate + ' x ' + (conv.price_factor || 1));
-      if (conv.raw_bid_a !== null && conv.raw_bid_a !== undefined) {
-        parts.push('A raw ' + fmt(conv.raw_bid_a, 4) + '/' +
-                   fmt(conv.raw_ask_a, 4));
-      }
+      add('A × ' + rate + ' × ' + (conv.price_factor || 1) +
+          (conv.raw_bid_a !== null && conv.raw_bid_a !== undefined
+            ? '  ·  A own ' + fmt(conv.raw_bid_a, 4) + ' / ' +
+              fmt(conv.raw_ask_a, 4) : '') +
+          (conv.fx_stale ? '  ·  ' + conv.fx_stale : ''),
+          conv.fx_stale ? 'warn' : '');
+    }
+    // SAME QUANTITY BOTH SIDES: what one Qty holds on each leg, in the
+    // commodity itself. A difference is an outright, not a spread.
+    var match = cross.lot_match;
+    if (match && match.qty_a) {
+      var unmatched = Math.abs(match.mismatch_pct) > 1;
+      var kilos = match.base_unit === 'g' && match.qty_a >= 1000;
+      var q = function (v) {
+        return kilos ? fmt(v / 1000, 3) + ' kg' : fmt(v, 0) + ' ' +
+          match.base_unit;
+      };
+      add('1 Qty: A ' + q(match.qty_a) + ' · B ' + q(match.qty_b) + ' (' +
+          (match.mismatch_pct >= 0 ? '+' : '') +
+          match.mismatch_pct.toFixed(2) + '%' +
+          (unmatched ? ' — outright, not spread' : '') + ')',
+          unmatched ? 'warn' : '');
     }
     function days(d) {
       return d === null || d === undefined ? DASH : fmt(d, 1) + 'd';
     }
     if (watch.days_a !== undefined || watch.days_b !== undefined) {
-      parts.push('expiry A ' + days(watch.days_a) + ' · B ' +
-                 days(watch.days_b));
+      add('expiry A ' + days(watch.days_a) + ' · B ' + days(watch.days_b) +
+          ((watch.warnings || []).length
+            ? '  ·  ' + watch.warnings.join('; ') : ''),
+          watch.level === 'alert' ? 'alert'
+            : watch.level === 'warn' ? 'warn' : '');
     }
-    (watch.warnings || []).forEach(function (w) { parts.push(w); });
-    if (conv && conv.fx_stale) { parts.push(conv.fx_stale); }
-    strip.textContent = parts.join('  ·  ');
-    strip.title = strip.textContent;
-    strip.className = 'cross-strip' + (watch.level === 'alert' ? ' alert'
-      : (watch.level === 'warn' || (conv && conv.fx_stale)) ? ' warn' : '');
+    strip.innerHTML = lines.map(function (line) {
+      return '<div class="cs-line ' + line.level + '">' +
+        escapeHtml(line.text) + '</div>';
+    }).join('');
+    strip.title = lines.map(function (l) { return l.text; }).join('\n');
+    strip.className = 'cross-strip';
   }
 
   function badgeClass(badge) {

@@ -821,6 +821,8 @@
                   '<div class="hint">MCX gold is quoted per 10 g, MCX ' +
                   'silver per kg, MCX crude per barrel.</div>');
     html += field('Unit factor', factorControl(draft, suggestion));
+    html += field('Lots per Qty — same quantity both sides',
+                  clipControl(draft));
     html += field('Leg A contract (override)', contractControl(draft, 'a'));
     html += field('Leg B contract (override)', contractControl(draft, 'b'));
     html += field('Pair type',
@@ -903,15 +905,6 @@
         ' (never typed in' + ((derived.specs.a || {}).contract_size_raw
           ? '; A is ' + escape(derived.specs.a.contract_size_raw) +
             ' per lot in its own unit' : '') + ')</div>';
-      if (derived.lot_match) {
-        var m = derived.lot_match;
-        html += '<div>One Qty in the commodity: A ' +
-          UI.fmt(m.qty_a, 2) + ' ' + escape(m.base_unit) + ' · B ' +
-          UI.fmt(m.qty_b, 2) + ' (' + UI.fmt(m.mismatch_pct, 2) +
-          '%) — closest small clip ' + escape(m.best_clip_a) + ' : ' +
-          escape(m.best_clip_b) + ' (' + UI.fmt(m.best_mismatch_pct, 2) +
-          '% off)</div>';
-      }
       if (derived.expiry_watch) {
         var w = derived.expiry_watch;
         html += '<div>Expiry: A ' + (w.days_a === null ? DASH
@@ -1029,6 +1022,64 @@
     return html;
   }
 
+  function clipControl(draft) {
+    /* What ONE Qty sends on each leg. A spread is only a spread when
+     * both legs hold the SAME AMOUNT of the commodity — 1 CL is 1,000
+     * bbl, so it is matched by 10 MCX CRUDEOIL of 100 bbl, not by 1.
+     * The match is worked out from the contracts and shown; the trader
+     * types or takes it. */
+    var html = '<span class="symbol-row"><input class="p-clip-a" ' +
+      'type="number" min="0" step="any" title="Leg A lots per Qty" ' +
+      'value="' + escape(draft.clip_lots_a || 1) + '"> : ' +
+      '<input class="p-clip-b" type="number" min="0" step="any" ' +
+      'title="Leg B lots per Qty" value="' + escape(draft.clip_lots_b || 1) +
+      '"></span>';
+    return html + '<div class="factor-working clip-working">' +
+      clipWorking(draft) + '</div>';
+  }
+
+  function qtyText(value, base) {
+    /* Grams past a kilo are written in kilos: 155,517 g is 155.52 kg. */
+    if (base === 'g' && Math.abs(value) >= 1000) {
+      return UI.fmt(value / 1000, 3) + ' kg';
+    }
+    return UI.fmt(value, 2) + ' ' + base;
+  }
+
+  function clipWorking(draft) {
+    var m = (local.derived || {}).lot_match;
+    if (!m) {
+      return '<div class="hint">Press Read both legs: the quantity each ' +
+        'lot holds is worked out from the two contracts.</div>';
+    }
+    // Re-scaled to the lots now in the boxes, so the line follows typing.
+    var la = parseFloat(draft.clip_lots_a) || 1;
+    var lb = parseFloat(draft.clip_lots_b) || 1;
+    var qa = la * m.lot_a, qb = lb * m.lot_b;
+    var off = qa ? 100 * (qb - qa) / qa : null;
+    var bad = off !== null && Math.abs(off) > 1;
+    var html = '<div class="worked' + (bad ? ' override' : '') + '">' +
+      'one Qty: A ' + la + ' × ' + qtyText(m.lot_a, m.base_unit) +
+      ' = <b>' + qtyText(qa, m.base_unit) + '</b> · B ' + lb + ' × ' +
+      qtyText(m.lot_b, m.base_unit) + ' = <b>' + qtyText(qb, m.base_unit) +
+      '</b> · ' + (off === null ? DASH
+        : (off >= 0 ? '+' : '') + off.toFixed(2) + '%') + '</div>';
+    if (bad) {
+      html += '<div class="hint problem-text">The ' + Math.abs(off).toFixed(2) +
+        '% difference is an OUTRIGHT position in the commodity, not part ' +
+        'of the spread.</div>';
+    }
+    if (m.best_clip_a) {
+      html += '<div class="hint">closest small match ' + m.best_clip_a +
+        ' : ' + m.best_clip_b + ' (' + UI.fmt(m.best_mismatch_pct, 2) +
+        '% off) <button class="btn tiny use-clip" data-a="' +
+        m.best_clip_a + '" data-b="' + m.best_clip_b + '">use ' +
+        m.best_clip_a + ' : ' + m.best_clip_b + '</button></div>';
+    }
+    return html + '<div class="hint">from ' + escape(m.source ||
+      'the contracts') + '</div>';
+  }
+
   function lotUnitSelect(cls, selected) {
     var html = '<select class="' + cls + '"><option value="">' +
       'price units — type the contract size</option>';
@@ -1142,6 +1193,8 @@
         draft.leg_a_factor = worked.factor;
       }
     }
+    var clip = form.querySelector('.clip-working');
+    if (clip) { clip.innerHTML = clipWorking(draft); }
     ['a', 'b'].forEach(function (leg) {
       var target = form.querySelector('.contract-working-' + leg);
       if (target) { target.innerHTML = contractWorking(draft, leg); }
@@ -1288,6 +1341,12 @@
     if (button.classList.contains('save-fx')) {
       return saveFx(row);
     }
+    if (button.classList.contains('use-clip')) {
+      readDraft();
+      local.draft.clip_lots_a = parseFloat(button.dataset.a);
+      local.draft.clip_lots_b = parseFloat(button.dataset.b);
+      return render(false);
+    }
     if (button.classList.contains('use-conversion')) {
       readDraft();
       local.draft.leg_a_fx = button.dataset.fx || '';
@@ -1341,6 +1400,8 @@
         leg_b_symbol: (pair.leg_b || {}).symbol,
         leg_a_fx: (pair.leg_a || {}).fx || '',
         leg_a_factor: (pair.leg_a || {}).price_factor,
+        clip_lots_a: pair.clip_lots_a || 1,
+        clip_lots_b: pair.clip_lots_b || 1,
         leg_a_lotqty: (pair.leg_a || {}).lot_quantity !== undefined
           ? (pair.leg_a || {}).lot_quantity : pair.contract_size_a,
         leg_a_lotunit: (pair.leg_a || {}).lot_unit || '',
@@ -1550,6 +1611,8 @@
       leg_a_fx: value('.p-fx-a').toUpperCase(),
       leg_a_unit: value('.p-unit-a'),
       leg_b_unit: value('.p-unit-b'),
+      clip_lots_a: parseFloat(value('.p-clip-a')) || local.draft.clip_lots_a,
+      clip_lots_b: parseFloat(value('.p-clip-b')) || local.draft.clip_lots_b,
       leg_a_lotqty: value('.p-lotqty-a') === ''
         ? null : parseFloat(value('.p-lotqty-a')),
       leg_a_lotunit: value('.p-lotunit-a'),
@@ -1607,6 +1670,8 @@
               lot_unit: draft.leg_b_lotunit || ''},
       pair_type: draft.pair_type,
       hedge_ratio: draft.hedge_ratio,
+      clip_lots_a: draft.clip_lots_a || 1,
+      clip_lots_b: draft.clip_lots_b || 1,
       increment: draft.increment,
       default_quantity: draft.default_quantity,
       quoting_leg: draft.quoting_leg || null,

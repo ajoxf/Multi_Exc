@@ -449,3 +449,63 @@ def test_contract_from_lot_shows_its_working():
     assert contracts.contract_from_lot(30, '', None)['contract_size'] == 30
     assert contracts.contract_from_lot(1, 'kg', 'bbl')['contract_size'] is None
     assert contracts.contract_from_lot(0, 'kg', 'kg') is None
+
+
+def test_same_quantity_is_judged_from_the_contracts_actually_traded():
+    """1 CL is 1,000 bbl: ten 100-bbl MCX lots match it exactly."""
+    m = contracts.quantity_match(1000, 'bbl', 100, 'bbl', 1, 10)
+    assert m['qty_a'] == m['qty_b'] == 1000
+    assert m['mismatch_pct'] == pytest.approx(0.0)
+    assert (m['best_clip_a'], m['best_clip_b']) == (1, 10)
+    # COMEX gold 100 oz against MCX GOLD (100 per 10g = 1 kg): 1 : 3 is
+    # 3.5% short, and the closest small clip is offered.
+    g = contracts.quantity_match(100, 'oz', 100, '10g', 1, 3)
+    assert g['qty_a'] == pytest.approx(3110.34768)
+    assert g['qty_b'] == pytest.approx(3000.0)
+    assert g['mismatch_pct'] == pytest.approx(-3.548, abs=0.01)
+    # Silver mini, 5 kg, against SI 5,000 oz = 155.5 kg: 1 : 31.
+    s = contracts.quantity_match(5000, 'oz', 5, 'kg', 1, 1)
+    assert s['best_clip_b'] == 31
+
+
+def test_an_override_changes_the_quantity_match():
+    """The broker's figure, or the override, decides — not the table."""
+    pair_leg_b = {'price_unit': 'kg'}
+    on_spec = contracts.pair_quantities({'price_unit': 'oz'}, pair_leg_b,
+                                        'SIH7', 'SILVER05MAR27FUT',
+                                        5000, 30, 1, 5)
+    overridden = contracts.pair_quantities({'price_unit': 'oz'}, pair_leg_b,
+                                           'SIH7', 'SILVER05MAR27FUT',
+                                           5000, 20, 1, 5)
+    assert on_spec['qty_b'] == pytest.approx(150000.0)
+    assert overridden['qty_b'] == pytest.approx(100000.0)
+    assert overridden['source'] == 'contracts'
+
+
+def test_with_no_units_or_sizes_the_exchange_table_is_used_and_said():
+    m = contracts.pair_quantities({}, {}, 'CLZ5', 'CRUDEOIL19NOV25FUT',
+                                  None, None, 1, 10)
+    assert m['source'] == 'exchange table'
+    assert m['mismatch_pct'] == pytest.approx(0.0)
+
+
+def test_unknown_units_are_no_match_not_a_match_of_zero():
+    assert contracts.quantity_match(100, 'oz', 100, 'bbl') is None
+    assert contracts.quantity_match(None, 'oz', 100, '10g') is None
+
+
+def test_the_ladder_is_told_how_much_each_leg_holds(cross):
+    coordinator, _config, pair, _legs, _book, _clock = cross
+    coordinator.poll_once()
+    match = coordinator.snapshot()['pairs'][pair.key]['cross']['lot_match']
+    assert match['qty_a'] == pytest.approx(1000.0)     # 1 x 1,000 bbl
+    assert match['qty_b'] == pytest.approx(1000.0)     # 10 x 100 bbl
+    assert match['source'] == 'contracts'
+
+
+def test_a_converted_gold_leg_is_counted_in_ounces_not_converted_units():
+    pair = gold_engine()
+    coordinator_match = contracts.pair_quantities(
+        pair.leg_a, pair.leg_b, pair.symbol_a, pair.symbol_b,
+        pair.meta_a['contract_size_raw'], pair.meta_b['contract_size'], 1, 3)
+    assert coordinator_match['qty_a'] == pytest.approx(3110.34768)

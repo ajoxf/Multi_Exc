@@ -490,11 +490,19 @@ def check_cross(checklist, pair, report_a, report_b, now=None):
                       report_b['contract_size_note'],
                       ['Check MCX\'s contract circular and place a one-lot '
                        'test order before trading size'])
-    match = contracts.lot_match(spec_a, spec_b, pair.clip_lots_a,
-                                pair.clip_lots_b)
+    match = contracts.pair_quantities(
+        getattr(pair, 'leg_a', None), getattr(pair, 'leg_b', None),
+        pair.symbol_a, pair.symbol_b,
+        getattr(pair, 'contract_size_a', None) or raw_a,
+        getattr(pair, 'contract_size_b', None) or report_b.get('contract_size'),
+        pair.clip_lots_a, pair.clip_lots_b)
     if match:
-        text = (f"one Qty = {match['qty_a']:,.4g} {match['base_unit']} on A "
-                f"against {match['qty_b']:,.4g} on B "
+        def amount(v):
+            if match['base_unit'] == 'g' and abs(v) >= 1000:
+                return f'{v / 1000:,.3f} kg'
+            return f"{v:,.6g} {match['base_unit']}"
+        text = (f"same quantity? one Qty = {amount(match['qty_a'])} on A "
+                f"against {amount(match['qty_b'])} on B "
                 f"({match['mismatch_pct']:+.2f}%)")
         if abs(match['mismatch_pct']) <= 1.0:
             checklist.add(scope, 'Lot match', PASS, text)

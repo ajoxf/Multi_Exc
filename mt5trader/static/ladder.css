@@ -2009,3 +2009,10 @@ table.grid-form select.f-kind { min-width: 96px; }
 .pair-form select.p-lotunit-a, .pair-form select.p-lotunit-b {
   display: block; width: 100%; box-sizing: border-box; }
 .pair-form select.p-lotunit-a, .pair-form select.p-lotunit-b { margin-top: 2px; }
+.pair-form input.p-clip-a, .pair-form input.p-clip-b { width: 44%; box-sizing: border-box; }
+/* The strip, one line per subject, each tinted by its own state. */
+.cross-strip { white-space: normal; padding: 0; }
+.cross-strip .cs-line { padding: 1px 4px; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.cross-strip .cs-line.warn { background: #fff4d6; color: #7a4b00; }
+.cross-strip .cs-line.alert { background: #ffd9d9; color: #8a0000; font-weight: bold; }

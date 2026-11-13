@@ -379,13 +379,97 @@ def lot_match(spec_a, spec_b, lots_a=1.0, lots_b=1.0):
         err = abs(lb * base_b - la * base_a) / (la * base_a)
         if best is None or err < best[2] - 1e-12:
             best = (la, lb, err)
+        if err <= CLIP_TOLERANCE:
+            # The SMALLEST clip within tolerance, not the most exact:
+            # 1 : 31 at 0.3% is a trade; 10 : 311 at 0.01% is not.
+            best = (la, lb, err)
+            break
     return {'qty_a': qty_a, 'qty_b': qty_b,
+            'lot_a': base_a, 'lot_b': base_b,
             'base_unit': {'mass': 'g', 'volume': 'bbl',
                           'energy': 'mmBtu'}[UNITS[_unit(spec_a.lot_unit)][0]],
             'mismatch_pct': None if mismatch is None else 100.0 * mismatch,
             'best_clip_a': best[0] if best else None,
             'best_clip_b': best[1] if best else None,
             'best_mismatch_pct': 100.0 * best[2] if best else None}
+
+
+#: How close two legs' quantities must be for a clip to count as a
+#: match when the smallest workable clip is suggested.
+CLIP_TOLERANCE = 0.005
+
+
+def quantity_match(contract_a, unit_a, contract_b, unit_b, lots_a=1.0,
+                   lots_b=1.0):
+    """The same comparison as `lot_match`, from the contract sizes the
+    system actually TRADES ON — the brokers' figures or the override —
+    and the units each price is quoted per, rather than from a table.
+
+    One lot of a leg holds `contract x size(price unit)` of the commodity
+    in the base quantity: a COMEX gold lot is 100 per oz-priced point =
+    100 oz = 3,110 g; an MCX GOLD lot is 100 per 10g-priced point =
+    1,000 g. That is the quantity the hedge has to match, leg against
+    leg, and the closest small whole clip is offered.
+
+    `contract_a` is in leg A's OWN units (before any conversion). None
+    when a size or a unit is unknown, or the units measure different
+    things — unmeasured is not a match of zero.
+    """
+    ua, ub = UNITS.get(_unit(unit_a)), UNITS.get(_unit(unit_b))
+    try:
+        ca, cb = float(contract_a), float(contract_b)
+    except (TypeError, ValueError):
+        return None
+    if ua is None or ub is None or ua[0] != ub[0] or ca <= 0 or cb <= 0:
+        return None
+    base_a, base_b = ca * ua[1], cb * ub[1]
+    qty_a, qty_b = lots_a * base_a, lots_b * base_b
+    best = None
+    for la in range(1, 11):
+        lb = round(la * base_a / base_b)
+        if lb < 1:
+            continue
+        err = abs(lb * base_b - la * base_a) / (la * base_a)
+        if best is None or err < best[2] - 1e-12:
+            best = (la, lb, err)
+        if err <= CLIP_TOLERANCE:
+            # The SMALLEST clip within tolerance, not the most exact:
+            # 1 : 31 at 0.3% is a trade; 10 : 311 at 0.01% is not.
+            best = (la, lb, err)
+            break
+    return {'qty_a': qty_a, 'qty_b': qty_b,
+            'lot_a': base_a, 'lot_b': base_b,
+            'base_unit': _BASE_NAMES[ua[0]],
+            'mismatch_pct': 100.0 * (qty_b - qty_a) / qty_a,
+            'best_clip_a': best[0] if best else None,
+            'best_clip_b': best[1] if best else None,
+            'best_mismatch_pct': 100.0 * best[2] if best else None,
+            'source': 'contracts'}
+
+
+def pair_quantities(pair_leg_a, pair_leg_b, symbol_a, symbol_b,
+                    contract_a, contract_b, lots_a=1.0, lots_b=1.0):
+    """The quantity match for a pair: from its traded contract sizes and
+    the units picked on the pair when both are known, else from the
+    exchange table by symbol. The result says which it used."""
+    unit_a = (pair_leg_a or {}).get('price_unit')
+    unit_b = (pair_leg_b or {}).get('price_unit')
+    if not unit_a or unit_a == 'custom':
+        quote = quote_for(symbol_a)
+        unit_a = quote[1] if quote else None
+    if not unit_b or unit_b == 'custom':
+        quote = quote_for(symbol_b, 'MCX')
+        unit_b = quote[1] if quote else None
+    found = quantity_match(contract_a, unit_a, contract_b, unit_b,
+                           lots_a, lots_b)
+    if found is not None:
+        return found
+    spec_a, spec_b = spec_for(symbol_a), spec_for(symbol_b, 'MCX')
+    found = lot_match(spec_a, spec_b, lots_a, lots_b) \
+        if (spec_a and spec_b) else None
+    if found is not None:
+        found['source'] = 'exchange table'
+    return found
 
 
 # --- expiries ----------------------------------------------------------
