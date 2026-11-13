@@ -64,7 +64,7 @@ def check(raw, terminals_running=0):
         for name, acct in accounts.items():
             value = str(acct.get(field) or '').strip()
             if field == 'terminal_path':
-                value = value.lower()
+                value = cfg.clean_terminal_path(value).lower()
             if not value:
                 continue
             if value in seen:
@@ -77,7 +77,7 @@ def check(raw, terminals_running=0):
             seen[value] = name
 
     missing = [name for name, acct in accounts.items()
-               if not str(acct.get('terminal_path') or '').strip()]
+               if not cfg.clean_terminal_path(acct.get('terminal_path'))]
     if missing:
         # These accounts attach to whatever is open, so something has
         # to BE open. This is the only case that still refuses.
@@ -94,17 +94,23 @@ def check(raw, terminals_running=0):
                      f"account.")
 
     launched = [name for name, acct in accounts.items()
-                if str(acct.get('terminal_path') or '').strip()]
+                if cfg.clean_terminal_path(acct.get('terminal_path'))]
     for name in launched:
-        path = accounts[name]['terminal_path']
-        if not os.path.exists(path):
-            return False, [
-                f"Account '{name}' points at {path}, and there is no file "
-                f"there. Either MetaTrader 5 was never unzipped to that "
-                f"folder, or it was moved. Re-run deploy\\SETUP.bat, or "
-                f"correct the path on the Exchanges page."]
-    if launched:
-        lines.append(f"{', '.join(launched)}: the engine opens the terminal "
+        # NOT A REFUSAL ANY MORE. This used to stop START-TRADING before
+        # the screen existed - and the screen is the one place a person
+        # who never opens config.json can fix it. So it is said here,
+        # the screen opens, the launcher holds the ENGINE (see
+        # `start.check_config`), and the engine starts by itself the
+        # moment the right MetaTrader is picked on the Exchanges page.
+        problem = cfg.terminal_missing(accounts[name].get('terminal_path'))
+        if problem:
+            lines.append(f"Account '{name}': {problem} The screen will "
+                         f"open; fix it on the Exchanges page, and the "
+                         f"engine starts by itself once it is found.")
+    found = [name for name in launched
+             if not cfg.terminal_missing(accounts[name].get('terminal_path'))]
+    if found:
+        lines.append(f"{', '.join(found)}: the engine opens the terminal "
                      f"and signs it in.")
     return True, lines
 

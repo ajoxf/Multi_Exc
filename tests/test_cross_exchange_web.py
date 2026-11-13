@@ -205,12 +205,9 @@ def test_the_alert_settings_are_saved_on_the_pair(client, paths):
 def test_telegram_status_never_shows_the_token(client, paths, tmp_path,
                                                monkeypatch):
     monkeypatch.delenv('TELEGRAM_BOT_TOKEN', raising=False)
-    monkeypatch.delenv('TELEGRAM_CHAT_ID', raising=False)
+    monkeypatch.delenv('TELEGRAM_ALLOWED_USERS', raising=False)
     assert client.get('/api/notify').get_json()['telegram'] is False
-    refused = client.post('/api/notify/test')
-    assert refused.status_code == 400
-    assert 'TELEGRAM_BOT_TOKEN' in refused.get_json()['error']
     (tmp_path / '.env').write_text('TELEGRAM_BOT_TOKEN="S3CR3T"\n'
-                                   'TELEGRAM_CHAT_ID="42"\n')
+                                   'TELEGRAM_ALLOWED_USERS="42"\n')
     body = client.get('/api/notify').get_json()
     assert body['telegram'] is True and 'S3CR3T' not in json.dumps(body)

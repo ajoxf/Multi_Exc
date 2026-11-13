@@ -84,6 +84,11 @@ class LegServer:
                         'margin': self.leg.margin_for(
                             msg['symbol'], msg.get('side', 'BUY'),
                             msg['volume'], msg.get('price'))}
+            if cmd == 'rates':
+                return {'ok': True,
+                        'rates': self.leg.rates(msg['symbol'],
+                                                msg.get('timeframe_min', 15),
+                                                msg.get('count', 100))}
             if cmd == 'depth':
                 return {'ok': True, 'depth': self.leg.depth(msg['symbol'])}
             if cmd == 'session_stats':

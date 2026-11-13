@@ -205,6 +205,37 @@ class ConvertedLeg:
             out[field] = self._out(t.get(field), m)
         return out
 
+    def rates(self, symbol, timeframe_min, count):
+        """History bars, restated like every other price.
+
+        The Algo builds its band and the backtest builds its trades from
+        these. Passed through unconverted — which is what `__getattr__`
+        would have done — a dollar leg's bars would be subtracted from
+        rupee bars: a spread that never existed, which in LIVE the Algo
+        would trade. So `close` and `point` (the bar's spread is counted
+        in points) go through the same multiplier as a tick.
+
+        AT TODAY'S RATE: the rate each bar was struck at is not known
+        here, so a long history carries USDINR's drift over it as part
+        of the spread. Unknown rate is no history at all (None), which
+        the Algo already reads as "collect from the live price".
+        """
+        bars = self.inner.rates(symbol, timeframe_min, count)
+        m, info = self.multiplier(symbol)
+        if bars is None or info is None:
+            return bars
+        if m is None:
+            return None
+        out = []
+        for bar in bars:
+            row = dict(bar)
+            row['close_raw'] = bar.get('close')
+            row['close'] = self._out(bar.get('close'), m)
+            if bar.get('point') is not None:
+                row['point'] = self._out(bar.get('point'), m)
+            out.append(row)
+        return out
+
     def ensure_symbol(self, symbol):
         reply = self.inner.ensure_symbol(symbol)
         m, info = self.multiplier(symbol)

@@ -21,18 +21,18 @@ Two rules from the spec shape the endpoints here:
 import logging
 import os
 import re
+import secrets
 import time
 from datetime import date
 
 from flask import Flask, jsonify, render_template, request
 
-from . import atomicfile, config as cfg, contracts, diagnostics, \
-    fairvalue, hedgeratio, sizing, slippage
+from . import analysis, atomicfile, config as cfg, contracts, diagnostics, \
+    fairvalue, hedgeratio, signals, sizing, slippage
 from .commands import CommandLog
 from .legs import RemoteLeg
 from .convert import Conversion, ConvertedLeg, conversions_from_config
 from .fx import FxBook, manual_entry, parse_pair
-from .notify import TelegramNotifier
 
 #: How old the status file may be before the UI says the engine is not
 #: running. Six polls at the default 0.3s: long enough not to flicker,
@@ -92,6 +92,14 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         anyway - so a browser that was closed without unlocking still
         finds the machine locked when it comes back.
         """
+        bot_secret = app.config.get('BOT_SECRET')
+        if bot_secret and secrets.compare_digest(
+                request.headers.get('X-MT5Trader-Bot', ''), bot_secret):
+            # The Telegram bot, from INSIDE this process (telegram.py).
+            # The lock guards the desk PC; the bot has its own guard,
+            # the allow-list of Telegram users, and this secret is made
+            # fresh at start-up and never leaves the process.
+            return None
         if request.method == 'GET':
             # Reading is not trading. The ladder goes on ticking behind
             # the overlay, exactly as it does behind TT's.
@@ -197,9 +205,32 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         cache.update({'stamp': stamp, 'body': body, 'path': status_path})
         return body
 
+    def held_reasons():
+        """What the launcher is holding the engine for, read from the
+        same config by the same rules (`config.engine_hold_reasons`).
+        Only asked while the engine is not up, so it costs nothing in
+        the normal case."""
+        try:
+            return cfg.engine_hold_reasons(cfg.load_raw(config_path))
+        except Exception:
+            return []
+
+    def waiting_note(held):
+        # What to DO comes first: the banner is one line, and the
+        # path in the reason can be long enough to push it off the end.
+        return ('the engine is waiting — open Exchanges to fix its setup; '
+                'it starts by itself once that is right. ' + held[0])
+
     def status():
         snapshot = read_status_file()
         if snapshot is None:
+            held = held_reasons()
+            if held:
+                # Not "down": WAITING, and for something a person can
+                # fix on this screen. Said, with where to fix it.
+                return {'engine': 'down', 'engine_held': held,
+                        'engine_note': waiting_note(held),
+                        'pairs': {}, 'accounts': {}}
             return {'engine': 'down',
                     'engine_note': ('the coordinator is not running — no '
                                     'prices, and a click would go nowhere'),
@@ -208,9 +239,19 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         snapshot['status_age_sec'] = age
         if age > STATUS_STALE_SEC:
             snapshot['engine'] = 'stalled'
-            snapshot['engine_note'] = (
-                f'the last snapshot is {age:.1f}s old — the coordinator has '
-                f'stopped or is stuck. Nothing on this screen is live.')
+            held = held_reasons()
+            if held:
+                # The launcher stopped the engine over a config change
+                # it will not run on. The last snapshot is still on disk,
+                # so the screen must say plainly that none of it is live.
+                snapshot['engine_held'] = held
+                snapshot['engine_note'] = (
+                    waiting_note(held) + ' Nothing on this screen is live.')
+            else:
+                snapshot['engine_note'] = (
+                    f'the last snapshot is {age:.1f}s old — the coordinator '
+                    f'has stopped or is stuck. Nothing on this screen is '
+                    f'live.')
         else:
             snapshot['engine'] = 'up'
         return snapshot
@@ -258,6 +299,35 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                             'pin_set': lock.pin_is_set(),
                             'auto_lock_sec': auto_lock_seconds()}
         return jsonify(snapshot)
+
+    @app.get('/api/chart/<path:key>')
+    def api_chart(key):
+        """One ladder's chart: its spread and the Algo's z over the
+        last `minutes`, as the engine last wrote them. Read-only."""
+        from .chart import chart_path
+        try:
+            minutes = max(1.0, min(float(request.args.get('minutes', 60)),
+                                   120.0))
+        except ValueError:
+            minutes = 60.0
+        body = read_json(chart_path(status_path)) or {}
+        series = (body.get('pairs') or {}).get(key)
+        if series is None:
+            return jsonify({'ok': True, 'candles': [], 'minutes': minutes,
+                            'note': 'no prices for this ladder yet \u2014 '
+                                    'the chart fills while the engine '
+                                    'runs'})
+        at = body.get('at')
+        candles = series.get('candles') or []
+        if at is not None:
+            since = float(at) - minutes * 60.0
+            candles = [c for c in candles if c.get('t', 0) >= since]
+        lows = [c['l'] for c in candles if c.get('l') is not None]
+        highs = [c['h'] for c in candles if c.get('h') is not None]
+        return jsonify(dict(series, ok=True, at=at, minutes=minutes,
+                            candles=candles,
+                            spread_min=min(lows) if lows else None,
+                            spread_max=max(highs) if highs else None))
 
     @app.get('/api/config')
     def api_config():
@@ -358,7 +428,8 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         fills = db.fills(pair_key=pair_key, account=account, ours_only=ours,
                          limit=limit)
         return jsonify({'ok': True, 'fills': fills,
-                        'totals': db.fill_totals(pair_key)})
+                        'totals': db.fill_totals(pair_key,
+                                                 ours_only=ours)})
 
     @app.get('/api/fills.csv')
     def api_fills_csv():
@@ -437,6 +508,111 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
             body['journal'] = None
         return body, None
 
+    # -- the Analysis tab ------------------------------------------------------
+
+    @app.get('/api/analysis')
+    def api_analysis():
+        """The Analysis tab, built from what is recorded: the positions
+        table (with each trade's extremes), the Algo's audit trail for
+        its z at both ends, the what-if shadows and the excursion
+        counters. Computes no price of its own.
+
+        `days`: trades OPENED in the last N days (0 = every one kept).
+        `zone_days`: the SIGMA ZONE track's own range, which is a
+            different question and has its own dropdown — the zone rows
+            are a tick-by-tick record and a day of them is the usual
+            read, where a day of trades is usually none. Filtered in
+            the query (see `Store.zone_events`), never by handing the
+            browser everything and throwing most of it away.
+        `pair`: one ladder, or all.
+        """
+        db = store()
+        if db is None:
+            return jsonify({'ok': False,
+                            'error': 'the database could not be opened'}), 503
+        try:
+            days = float(request.args.get('days', 7))
+        except ValueError:
+            days = 7.0
+        pair_key = request.args.get('pair') or None
+        now = time.time()
+        start = None if days <= 0 else now - days * 86400.0
+        positions = db.positions_between(start, None, pair_key=pair_key)
+        events = db.events_between(('algo_signal', 'algo_order'), start)
+        if pair_key:
+            events = [e for e in events if e.get('pair_key') == pair_key]
+        shadows = db.shadows(since=start, pair_key=pair_key)
+        excursions = db.excursions()
+        if pair_key:
+            excursions = {k: v for k, v in excursions.items()
+                          if k == pair_key}
+        raw = cfg.load_raw(config_path)
+        names = {key: (pair or {}).get('name') or key
+                 for key, pair in (raw.get('pairs') or {}).items()}
+        body = analysis.report(positions, events, shadows, excursions, now)
+        try:
+            zone_days = float(request.args.get('zone_days', 1))
+        except ValueError:
+            zone_days = 1.0
+        zone_since = None if zone_days <= 0 else now - zone_days * 86400.0
+        # ONE DAY, on the BROKER's clock, beats the rolling window when
+        # it is given: "5 Nov" is a question about a day, not about the
+        # last 24 hours, and the two are different near a boundary.
+        zone_date = (request.args.get('date') or '').strip() or None
+        if zone_date and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', zone_date):
+            return jsonify({'ok': False,
+                            'error': f'{zone_date} is not a date — '
+                                     f'YYYY-MM-DD'}), 400
+        try:
+            signal_rows = db.signals(pair_key, since=zone_since,
+                                     broker_day=zone_date)
+            signal_days = db.signal_days(pair_key)
+        except Exception as e:
+            # A tab that cannot read one section still shows the rest:
+            # the zone track is a reading, not the money.
+            logging.error('the signal track could not be read: %s', e)
+            signal_rows, signal_days = [], []
+        return jsonify(dict(body, ok=True, days=days, pair=pair_key,
+                            names=names,
+                            zone_days=zone_days,
+                            date=zone_date,
+                            # The JOURNAL shape: newest first, each row
+                            # carrying why it ended and a running total.
+                            signals=signals.journal(signal_rows),
+                            signal_days=signal_days,
+                            signal_tally=signals.tally(signal_rows)))
+
+    @app.get('/api/position/<position_id>')
+    def api_position(position_id):
+        """One position as recorded, with what its message needs that the
+        record alone does not hold: each leg's CLOSING price from the
+        broker's own closing deals, and the Algo's z at both ends."""
+        db = store()
+        if db is None:
+            return jsonify({'ok': False,
+                            'error': 'the database could not be opened'}), 503
+        row = db.position(position_id)
+        if row is None:
+            return jsonify({'ok': False, 'error': 'no such position'}), 404
+        exits = {}
+        for leg in ('leg_a', 'leg_b'):
+            fill = row.get(leg) or {}
+            try:
+                exits[leg] = db.closing_price(fill.get('account'),
+                                              fill.get('position_tickets'))
+            except Exception as e:                # a journal mid-write
+                logging.error('closing price of %s: %s', position_id, e)
+                exits[leg] = None
+        opened = row.get('opened_at') or 0
+        events = [e for e in db.events_between(
+            ('algo_signal', 'algo_order'), opened - 120.0,
+            (row.get('closed_at') or time.time()) + 60.0)
+            if e.get('pair_key') == row.get('pair_key')]
+        entry_z, exit_z = analysis.algo_z(events)
+        return jsonify({'ok': True, 'position': row, 'exit_prices': exits,
+                        'entry_z': entry_z.get(position_id),
+                        'exit_z': exit_z.get(position_id)})
+
     @app.get('/api/slippage')
     def api_slippage():
         body, error = slippage_report()
@@ -460,7 +636,11 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         columns = ['opened_at', 'closed_at', 'pair_key', 'side', 'quantity',
                    'order_type', 'entry_points', 'entry_money', 'exit_points',
                    'exit_money', 'round_trip_points', 'round_trip_money',
-                   'click_to_on_ms', 'realized_pnl', 'position_id']
+                   'click_to_on_ms', 'realized_pnl', 'position_id',
+                   # Which LEG slipped: its own price points against the
+                   # touch it was sent at, positive a cost.
+                   'symbol_a', 'entry_leg_a', 'exit_leg_a',
+                   'symbol_b', 'entry_leg_b', 'exit_leg_b']
         writer = csv.DictWriter(buffer, fieldnames=columns,
                                 extrasaction='ignore')
         writer.writeheader()
@@ -472,6 +652,41 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                 {'Content-Type': 'text/csv',
                  'Content-Disposition':
                      'attachment; filename=slippage.csv'})
+
+    @app.get('/api/algo_signals.csv')
+    def api_algo_signals_csv():
+        """Every Algo signal, for a spreadsheet: what it said, when, at
+        what z and spread — and, for an exit, what the position would
+        have made after costs. Signals only: nothing here was sent.
+
+        Empty cells, not zeros, where nothing was measured.
+        """
+        import csv
+        import io
+        db = store()
+        if db is None:
+            return 'the database could not be opened', 503
+        rows = db.events('algo_signal',
+                         min(int(request.args.get('limit', 5000)), 50000))
+        buffer = io.StringIO()
+        columns = ['at', 'pair_key', 'mode', 'action', 'side', 'reason', 'z',
+                   'spread', 'mid_spread', 'mean', 'sigma', 'upper', 'lower',
+                   'entry_z', 'position_id', 'entry_spread', 'break_even',
+                   'tp', 'net_pnl']
+        writer = csv.DictWriter(buffer, fieldnames=columns,
+                                extrasaction='ignore')
+        writer.writeheader()
+        for row in reversed(rows):                  # oldest first
+            line = dict(row.get('detail') or {})
+            line['at'] = time.strftime('%Y-%m-%d %H:%M:%S',
+                                       time.localtime(row['at']))
+            line['pair_key'] = row.get('pair_key')
+            writer.writerow({c: ('' if line.get(c) is None else line.get(c))
+                             for c in columns})
+        return (buffer.getvalue(), 200,
+                {'Content-Type': 'text/csv',
+                 'Content-Disposition':
+                     'attachment; filename=algo_signals.csv'})
 
     @app.get('/api/events')
     def api_events():
@@ -518,9 +733,24 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                                                account.get('login')),
                 'terminal_clash': cfg.terminal_clash(
                     raw, name, account.get('terminal_path')),
+                # A MetaTrader 5 that is not where the row says - on the
+                # row, in words, because the launcher holds the engine
+                # until it is found and this is where it gets fixed.
+                'terminal_missing': cfg.terminal_missing(
+                    account.get('terminal_path')),
             })
         return jsonify({'accounts': accounts,
                         'next_free_port': cfg.next_free_port(raw)})
+
+    @app.get('/api/terminals')
+    def api_terminals():
+        """Every MetaTrader 5 installed on this PC, to PICK on the
+        Exchanges page instead of typing a path - and which account, if
+        any, already uses each. Works with the engine down, which is
+        exactly when it is needed."""
+        raw = cfg.load_raw(config_path)
+        return jsonify({'ok': True,
+                        'terminals': cfg.find_terminals(raw)})
 
     @app.post('/api/accounts/<path:name>')
     def api_save_account(name):
@@ -536,7 +766,8 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         # What the row held BEFORE the edit: the guards must only refuse
         # a value being newly CLAIMED, or an existing clash is unfixable
         # because every save of either row trips over the other.
-        was = {'terminal_path': (account.get('terminal_path') or '').strip(),
+        was = {'terminal_path': cfg.clean_terminal_path(
+                   account.get('terminal_path')),
                'endpoint': (account.get('endpoint') or '').strip(),
                'login': str(account.get('login') or '')}
 
@@ -551,7 +782,10 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                 endpoint = f'{host}:{port}'
             except ValueError as e:
                 return jsonify({'ok': False, 'error': str(e)}), 400
-        path = (payload.get('terminal_path') or '').strip()
+        # What was PASTED, made into the file it means: the quotes
+        # Windows' "Copy as path" adds come off, and a MetaTrader folder
+        # becomes the terminal64.exe inside it.
+        path = cfg.terminal_file(payload.get('terminal_path'))
         if path and path.lower() != was['terminal_path'].lower():
             clash = cfg.terminal_clash(raw, name, path)
             if clash:
@@ -576,7 +810,11 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         account.update({
             'kind': kind,
             'endpoint': endpoint or account.get('endpoint'),
-            'terminal_path': path or account.get('terminal_path'),
+            # Saving the row also cleans a path saved BEFORE this was
+            # cleaned: the quotes come off the file, not only the read.
+            'terminal_path': path or cfg.clean_terminal_path(
+                account.get('terminal_path')) or None,
+            # An Arrow account has no MT5 login: its user id names it.
             'login': login if kind == 'mt5' else None,
             'server': payload.get('server') or account.get('server'),
         })
@@ -611,8 +849,13 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                 os.environ[key] = secret
         return jsonify({'ok': True, 'account': name,
                         'restart_required': True,
-                        'note': 'accounts are structural — restart the '
-                                'launcher for this to take effect'})
+                        # The launcher watches the accounts and restarts
+                        # the engine itself; nobody has to.
+                        'note': 'saved — the engine restarts by itself to '
+                                'pick it up',
+                        'terminal_path': account.get('terminal_path'),
+                        'terminal_missing': cfg.terminal_missing(
+                            account.get('terminal_path'))})
 
     @app.get('/api/accounts/<path:name>/symbols')
     def api_find_symbols(name):
@@ -972,39 +1215,21 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                         'points': rows,
                         'engine': bool(data)})
 
-    def telegram():
-        # Read from .env each time, so a token added there works without
-        # restarting the web process. Never echoed back to the page.
+    @app.get('/api/notify')
+    def api_notify():
+        """Whether the desk's Telegram bot is set up — the bot that also
+        carries the arbitrage alerts. Never the token."""
         try:
             from dotenv import dotenv_values
             env = dotenv_values(os.path.join(os.path.dirname(
                 os.path.abspath(config_path)) or '.', '.env'))
         except ImportError:
             env = {}
-        return TelegramNotifier(
-            token=env.get('TELEGRAM_BOT_TOKEN')
-            or os.environ.get('TELEGRAM_BOT_TOKEN'),
-            chat_id=env.get('TELEGRAM_CHAT_ID')
-            or os.environ.get('TELEGRAM_CHAT_ID'),
-            background=False)
-
-    @app.get('/api/notify')
-    def api_notify():
-        """Whether arbitrage alerts can reach a phone — never the token."""
-        return jsonify({'ok': True, 'telegram': telegram().configured})
-
-    @app.post('/api/notify/test')
-    def api_notify_test():
-        sender = telegram()
-        if not sender.configured:
-            return jsonify({'ok': False, 'error': (
-                'Telegram is not set up: put TELEGRAM_BOT_TOKEN and '
-                'TELEGRAM_CHAT_ID in .env (see docs/SETUP.md)')}), 400
-        if not sender.send('Multi_Exc: test message — arbitrage alerts '
-                           'will arrive here.'):
-            return jsonify({'ok': False, 'error': (
-                f'Telegram refused it: {sender.last_error}')}), 502
-        return jsonify({'ok': True})
+        token = env.get('TELEGRAM_BOT_TOKEN') or \
+            os.environ.get('TELEGRAM_BOT_TOKEN')
+        users = env.get('TELEGRAM_ALLOWED_USERS') or \
+            os.environ.get('TELEGRAM_ALLOWED_USERS')
+        return jsonify({'ok': True, 'telegram': bool(token and users)})
 
     @app.get('/api/units')
     def api_units():
@@ -1234,6 +1459,35 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         # are computed from the pair's CURRENT clip, so a position
         # entered at 0.01 would silently acquire the target of a 0.10
         # one. It is refused while anything is on.
+        # The Algo's numbers are checked BEFORE anything is written: a
+        # timeframe MT5 has no bars for, or an entry z of 0, saved
+        # quietly would signal on every tick or never.
+        if 'algo_params' in payload:
+            from . import algo as algo_module
+            problems = algo_module.check_params(payload['algo_params'] or {})
+            if problems:
+                return jsonify({'ok': False,
+                                'error': 'Algo: ' + '; '.join(problems)}), 400
+        # This ladder's hours: a time that will not parse is REFUSED with
+        # what was wrong, and a break needs both its ends.
+        from . import session as session_module
+        hours = {'session_open': 'Session open',
+                 'session_close': 'Session close',
+                 'break_start': 'Break start', 'break_end': 'Break end'}
+        for field, label in hours.items():
+            if field in payload:
+                try:
+                    session_module.parse_hhmm(payload[field])
+                except ValueError as e:
+                    return jsonify({'ok': False,
+                                    'error': f'{label}: {e}'}), 400
+                payload[field] = session_module.clean_hhmm(payload[field])
+        ends = [payload.get(f, pair.get(f)) for f in ('break_start',
+                                                       'break_end')]
+        if sum(1 for v in ends if v not in (None, '')) == 1:
+            return jsonify({'ok': False, 'error': (
+                'Break: give both a start and an end, or leave both '
+                'blank')}), 400
         resizing = ('clip_lots_a' in payload
                     and _changed(payload['clip_lots_a'],
                                  pair.get('clip_lots_a')))
@@ -1252,7 +1506,7 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                       'rows', 'clip_lots_a', 'clip_lots_b',
                       'contract_size_a', 'contract_size_b',
                       'max_quote_age_sec',
-                      'expiry', 'expiry_a', 'auto_route',
+                      'expiry', 'expiry_a',
                       'swap_a_long_per_lot', 'swap_a_short_per_lot',
                       'swap_b_long_per_lot', 'swap_b_short_per_lot',
                       # What a trade on THIS ladder costs, and therefore
@@ -1263,7 +1517,9 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                       'slippage_allowance', 'break_even_nights',
                       'tp_target_pct_of_margin',
                       'carry_rate_pct',
-                      'show_fair_window', 'algo', 'algo_window',
+                      'show_fair_window', 'algo_window', 'algo_params',
+                      'session_open', 'session_close',
+                      'break_start', 'break_end',
                       # The arbitrage ALERT — never an order.
                       'arb_alert', 'arb_normal', 'arb_normal_pct',
                       'arb_margin', 'arb_extra_cost', 'arb_z',
@@ -1469,8 +1725,18 @@ def main():
                                '%(message)s',
                         handlers=[logging.StreamHandler()])
     logsetup.setup('web')
+    # The screen polls three times a second; a line for each poll buried
+    # every error in web.log. Button presses and failures still log.
+    logsetup.quiet_polling()
     app = create_app(args.status, args.commands, args.results, args.config,
                      args.db)
+    # Telegram, if .env carries a bot token. The token is read from the
+    # environment only — never from config.json, never logged.
+    if cfg.load_dotenv is not None:
+        cfg.load_dotenv(os.path.join(
+            os.path.dirname(os.path.abspath(args.config)) or '.', '.env'))
+    from . import telegram
+    telegram.start(app)
     app.run(host=args.host, port=args.port, threaded=True)
 
 

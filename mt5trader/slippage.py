@@ -82,6 +82,59 @@ def money(points, position):
     return points * float(units) * float(quantity)
 
 
+def _leg_slips(position):
+    """Each leg's own slip, entry and exit: price points of THAT leg
+    against the touch it was sent at (positive a cost), and the same in
+    money. A leg whose send price was not kept is None, not zero."""
+    out = {}
+    for leg in ('a', 'b'):
+        fill = position.get('leg_' + leg) or {}
+        side = fill.get('side')
+        closing = {'BUY': 'SELL', 'SELL': 'BUY'}.get(side)
+        size = None
+        try:
+            size = float(fill['volume']) * float(fill['contract_size'])
+        except (KeyError, TypeError, ValueError):
+            pass
+        for end, (s, sent, got) in (
+                ('entry', (side, fill.get('sent_price'), fill.get('price'))),
+                ('exit', (closing, fill.get('exit_sent_price'),
+                          fill.get('exit_price')))):
+            points = _slip(s, sent, got)
+            out[f'{end}_leg_{leg}'] = points
+            out[f'{end}_leg_{leg}_money'] = (
+                None if points is None or size is None else points * size)
+    return out
+
+
+def _slip(side, sent, filled):
+    if side is None or sent is None or filled is None:
+        return None
+    return (float(filled) - float(sent)) if side == 'BUY' \
+        else (float(sent) - float(filled))
+
+
+def _mean(values):
+    values = [v for v in values if v is not None]
+    return (sum(values) / len(values)) if values else None
+
+
+def _leg_summary(rows):
+    """Per leg, the mean slip at entry and at exit, with how many were
+    measured - which LEG a ladder's slippage comes from."""
+    out = {}
+    for end in ('entry', 'exit'):
+        for leg in ('a', 'b'):
+            key = f'{end}_leg_{leg}'
+            values = [r[key] for r in rows if r.get(key) is not None]
+            out[key] = {'measured': len(values), 'points_mean': _mean(values),
+                        'money_total': (sum(r[key + '_money'] for r in rows
+                                            if r.get(key + '_money')
+                                            is not None)
+                                        if values else None)}
+    return out
+
+
 def _stats(samples):
     """Summarise one end (entries, or exits) of a set of positions.
 
@@ -148,6 +201,9 @@ def _rows(positions):
                                  else money(both, position)),
             'click_to_on_ms': position.get('click_to_on_ms'),
             'realized_pnl': position.get('realized_pnl'),
+            'symbol_a': (position.get('leg_a') or {}).get('symbol'),
+            'symbol_b': (position.get('leg_b') or {}).get('symbol'),
+            **_leg_slips(position),
         })
     return rows
 
@@ -163,6 +219,7 @@ def _summarise(rows):
         'round_trip': _stats([(r['round_trip_points'], r['round_trip_money'])
                               for r in rows if not r['open']]),
         'positions': len(rows),
+        'legs': _leg_summary(rows),
     }
 
 

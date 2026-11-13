@@ -91,6 +91,7 @@ def half_close(broker):
 
 # -- entries --------------------------------------------------------------
 
+@pytest.mark.quote
 def test_a_LIMIT_entry_that_fills_is_written_through(engine, pair, legs,
                                                      store):
     """The worst of the three. A restart recovered NOTHING, so two live

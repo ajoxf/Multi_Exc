@@ -92,20 +92,43 @@ way to hedge: MCX rich (sell MCX / buy CME) → buy USDINR; MCX cheap →
 sell USDINR. An alert shows on the ladder, as a banner and a sound, in
 the log, and — if set up — on Telegram.
 
-To get alerts on your phone:
+To get alerts (and the desk's Telegram remote) on your phone:
 
 1. In Telegram, message **@BotFather**, send `/newbot`, and copy the token.
-2. Send any message to your new bot.
-3. Open `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser
-   and copy the `chat` → `id` number.
-4. Put both in `.env` (never in config.json):
+2. Message **@userinfobot** to get your numeric Telegram user id.
+3. Put both in `.env` (never in config.json). Only the ids listed get
+   an answer:
 
 ```bash
 TELEGRAM_BOT_TOKEN="123456:ABC..."
-TELEGRAM_CHAT_ID="123456789"
+TELEGRAM_ALLOWED_USERS="123456789"
 ```
 
-5. Exchanges page → **Send test** under Exchange rates.
+4. Restart `start.py` and send the bot a message.
+
+## Algo — Signals or LIVE, per ladder (as in Mirror-MT5-Trader)
+
+Each ladder's title bar has an **ALGO** switch:
+
+- **Off** — manual: you click, as always.
+- **Signals** — the Algo works out entries and exits from the spread's
+  z-score and tells you (screen, sound, Telegram). It sends nothing;
+  you trade.
+- **LIVE** — the Algo trades that ladder by its rules: MARKET both legs
+  in, closes by ticket. Confirmed every time it is switched on, OFF
+  after every restart, refused on a ladder with a manual position or
+  working order, and while it is LIVE the ladder takes no manual
+  orders (closes still work).
+
+Its settings (entry z, candle timeframe, filters, stops) are on the
+ladder's ⚙. Run it in **Signals** first, and LIVE only after
+`pytest tests/ -q` passes.
+
+On these pairs the Algo's price history comes from MT5 for leg A
+(restated in rupees at today's USDINR) but **not yet from Arrow** for
+leg B: until Arrow's candle endpoint has been confirmed on a live
+login, the Algo builds its candles from the live price after it is
+switched on, and says so ("collecting from the live price").
 
 ## Running the pieces separately (while setting up)
 

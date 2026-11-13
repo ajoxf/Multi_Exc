@@ -412,6 +412,10 @@ def test_the_journal_records_what_the_broker_reported(desk, browser_page):
     text = page.text_content('.monitor .pane')
     assert 'commission' in text
     assert 'Export CSV' in text
+    # Each row carries its DATE, and the totals say what they cover.
+    import re
+    assert re.search(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', text), text
+    assert 'every fill in the journal' in text
 
 
 def test_a_manual_trade_in_the_terminal_is_journalled_but_not_ours(
@@ -553,6 +557,17 @@ def test_the_slippage_report_covers_the_session_that_was_just_traded(
     # counted over the same stretch as a check on coverage.
     assert body['window']['clock'] == 'broker'
     assert body['journal']['fills'] >= 4
+    # WHICH LEG: each one's send price came back through the leg runner
+    # and the database, so every leg at both ends is measured - here at
+    # zero, because the fake fills at its quote.
+    [row] = body['rows']
+    for key in ('entry_leg_a', 'entry_leg_b', 'exit_leg_a', 'exit_leg_b'):
+        assert row[key] == pytest.approx(0.0), key
+    csv_text = app.test_client().get('/api/slippage.csv').get_data(
+        as_text=True)
+    header = csv_text.splitlines()[0].split(',')
+    for column in ('entry_leg_a', 'exit_leg_a', 'entry_leg_b', 'exit_leg_b'):
+        assert column in header
 
 
 def test_the_slippage_report_is_on_the_screen(desk, browser_page, round_turn):
@@ -570,6 +585,53 @@ def test_the_slippage_report_is_on_the_screen(desk, browser_page, round_turn):
     assert 'Entries by ladder' in text and 'XAUUSD_|GC1226' in text
     assert 'MARKET' in text                      # by order type
     assert 'unmeasured' not in text              # everything was priced
+    assert page.errors == []
+
+
+def test_the_analysis_covers_the_round_turn_just_traded(desk, round_turn):
+    """The Analysis tab's report, over the trade this module made: in
+    the summary, in the journal with both legs, and nothing invented
+    for what was not measured."""
+    app = create_app(desk.paths['status'], desk.paths['commands'],
+                     desk.paths['results'], desk.paths['config'],
+                     desk.paths['db'])
+    app.config.update(TESTING=True)
+
+    body = app.test_client().get('/api/analysis?days=1').get_json()
+
+    assert body['ok']
+    assert body['summary']['closed'] == 1
+    assert body['summary']['net_pnl'] is not None
+    [trip] = body['journal']
+    assert trip['pair_key'] == 'XAUUSD_|GC1226'
+    assert trip['entry_spread'] is not None and trip['exit_spread'] is not None
+    assert trip['leg_a']['entry'] is not None
+    assert trip['cum_pnl'] == pytest.approx(trip['pnl'])
+    # A manual trade has no Algo z at either end — a dash, not 0.
+    assert trip['entry_z'] is None
+    assert body['drawdown']['trades'] == 1
+
+
+def test_the_analysis_tab_is_on_the_screen(desk, browser_page, round_turn):
+    page = browser_page
+    page.evaluate("""() => {
+        window.MT5Trader.state.open = ['monitor:'];
+        window.MT5Trader.state.monitorTab = 'analysis';
+        window.MT5Trader.state.analysis = null;
+        window.MT5Trader.state.analysisDays = 1;
+        window.MT5Trader.render();
+    }""")
+    page.wait_for_function(
+        "() => document.querySelector('.monitor .pane').textContent"
+        ".includes('Trade journal')", timeout=8000)
+    text = page.text_content('.monitor .pane')
+    for heading in ('Summary', 'Drawdown', 'Take / hold calibration',
+                    'What if held?', 'Backtest', 'Signals',
+                    'Trade journal'):
+        assert heading in text, heading
+    assert '1 closed' in text
+    # The tab button is there for the trader to find.
+    assert page.locator('.monitor .tabs button[data-tab="analysis"]').count() == 1
     assert page.errors == []
 
 

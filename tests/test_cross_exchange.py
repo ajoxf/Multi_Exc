@@ -509,3 +509,30 @@ def test_a_converted_gold_leg_is_counted_in_ounces_not_converted_units():
         pair.leg_a, pair.leg_b, pair.symbol_a, pair.symbol_b,
         pair.meta_a['contract_size_raw'], pair.meta_b['contract_size'], 1, 3)
     assert coordinator_match['qty_a'] == pytest.approx(3110.34768)
+
+
+def test_history_bars_are_restated_like_ticks():
+    """The Algo builds its band from these: dollar bars minus rupee bars
+    would be a spread that never existed."""
+    leg, broker, book, _clock = oil_leg(84.0)
+    leg.inner.rates = lambda symbol, tf, count: [
+        {'time': 1, 'close': 70.0, 'spread': 2, 'point': 0.01}]
+    bars = leg.rates('CLZ5', 15, 10)
+    assert bars[0]['close'] == pytest.approx(70.0 * 84.0)
+    assert bars[0]['point'] == pytest.approx(0.01 * 84.0)
+    assert bars[0]['close_raw'] == 70.0
+
+
+def test_with_no_rate_there_is_no_history_rather_than_dollar_history():
+    leg, broker, book, _clock = oil_leg(84.0)
+    leg.inner.rates = lambda symbol, tf, count: [
+        {'time': 1, 'close': 70.0, 'spread': 2, 'point': 0.01}]
+    book._raw = {}
+    assert leg.rates('CLZ5', 15, 10) is None
+
+
+def test_control_an_unconverted_symbol_passes_its_bars_through():
+    leg, broker, book, _clock = oil_leg(84.0)
+    raw = [{'time': 1, 'close': 1.5, 'spread': 2, 'point': 0.0001}]
+    leg.inner.rates = lambda symbol, tf, count: raw
+    assert leg.rates('EURUSD', 15, 10) == raw

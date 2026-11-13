@@ -70,6 +70,10 @@ def compute_spread(pair, tick_a, tick_b, hedge_ratio=1.0, clock=time_mod.time):
         'leg_b_width': ask_b - bid_b,
         'hedge_ratio': beta,
         'spread': mid_spread,
+        # The same number by the name the Algo reads. Without it the
+        # Algo's live candles were never fed: its band was MT5's history
+        # from the moment it was switched on, going stale all session.
+        'mid_spread': mid_spread,
         'short_spread': short_spread,
         'long_spread': long_spread,
         # Exactly one round turn of both legs' bid-ask, in spread units:

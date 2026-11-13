@@ -198,6 +198,13 @@ class LegFill:
         self.position_tickets = list(position_tickets or [])
         self.contract_size = contract_size
         self.at = clock() if at is None else at
+        #: What MT5 was quoting this leg at when the order was SENT, and
+        #: the same for the close: beside the fills they say which leg
+        #: slipped and by how much. None when it was not reported (a
+        #: limit that filled, a fill from before this was kept).
+        self.sent_price = None
+        self.exit_sent_price = None
+        self.exit_price = None
 
     def to_dict(self):
         return {
@@ -206,16 +213,28 @@ class LegFill:
             'price': self.price, 'order_ticket': self.order_ticket,
             'position_tickets': list(self.position_tickets),
             'contract_size': self.contract_size, 'at': self.at,
+            'sent_price': self.sent_price,
+            'exit_sent_price': self.exit_sent_price,
+            'exit_price': self.exit_price,
         }
 
     @classmethod
     def from_dict(cls, raw):
         if not raw:
             return None
-        return cls(raw['account'], raw['symbol'], raw['side'], raw['volume'],
+        fill = cls(raw['account'], raw['symbol'], raw['side'], raw['volume'],
                    raw['price'], order_ticket=raw.get('order_ticket'),
                    position_tickets=raw.get('position_tickets'),
                    contract_size=raw.get('contract_size'), at=raw.get('at'))
+        fill.sent_price = raw.get('sent_price')
+        fill.exit_sent_price = raw.get('exit_sent_price')
+        fill.exit_price = raw.get('exit_price')
+        return fill
+
+
+#: Who opened a position. See `SpreadPosition.source`.
+MANUAL = 'MANUAL'
+ALGO_SOURCE = 'ALGO'
 
 
 class SpreadPosition:
@@ -278,6 +297,35 @@ class SpreadPosition:
         self.recovered = False
         #: Set once the reconciler has seen both legs at the broker.
         self.confirmed = False
+        #: Who put it on: MANUAL (a click) or ALGO. Every position is
+        #: MANUAL today — nothing trades by itself — but the tag is
+        #: stored from now, so when execution arrives an algo re-adopts
+        #: only what IT opened after a restart, and never a trader's.
+        self.source = MANUAL
+        #: The margin ONE spread tied up, read once — the first time this
+        #: position is priced after its fill — and kept. TP and SL are a
+        #: % of it, so they stay where they were set instead of drifting
+        #: as the oil price moves the terminals' margin. None until read.
+        self.entry_margin = None
+        #: The spread's ATR (spread points) when this position was first
+        #: priced, and kept - an ATR stop or target is sized from it and
+        #: stays where it was set. None until read.
+        self.entry_atr = None
+        #: The best and worst net P&L while open, and the minute (from
+        #: the open) each was reached — the trade's MFE and MAE. None
+        #: until measured: a trade never marked has no extremes, not 0.
+        self.peak_pnl = None
+        self.peak_min = None
+        self.trough_pnl = None
+        self.trough_min = None
+        #: The levels this position was being JUDGED against on the last
+        #: pass that priced it: break-even, take-profit, stop, and which
+        #: setting produced each. Refreshed while it is open, so the set
+        #: left on a closed position is the one its exit was decided on
+        #: - which is the only way the Analysis tab can say WHY a stop
+        #: fired and at what number. None until priced, and None for
+        #: every position closed before this was kept.
+        self.exit_levels = None
 
     @property
     def is_open(self):
@@ -385,6 +433,12 @@ class SpreadPosition:
             'naked_ms': self.naked_ms,
             'recovered': self.recovered,
             'confirmed': self.confirmed,
+            'source': self.source,
+            'entry_margin': self.entry_margin,
+            'entry_atr': self.entry_atr,
+            'peak_pnl': self.peak_pnl, 'peak_min': self.peak_min,
+            'trough_pnl': self.trough_pnl, 'trough_min': self.trough_min,
+            'exit_levels': self.exit_levels,
             'leg_a': self.leg_a.to_dict() if self.leg_a else None,
             'leg_b': self.leg_b.to_dict() if self.leg_b else None,
         }
@@ -414,6 +468,12 @@ class SpreadPosition:
         position.exit_slippage = raw.get('exit_slippage')
         position.click_to_on_ms = raw.get('click_to_on_ms')
         position.naked_ms = raw.get('naked_ms')
+        position.source = raw.get('source') or MANUAL
+        position.entry_margin = raw.get('entry_margin')
+        position.entry_atr = raw.get('entry_atr')
+        for name in ('peak_pnl', 'peak_min', 'trough_pnl', 'trough_min',
+                     'exit_levels'):
+            setattr(position, name, raw.get(name))
         #: Recovered from disk rather than seen happen. The monitor says
         #: so until the reconciler has confirmed both legs at the broker.
         position.recovered = True

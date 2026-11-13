@@ -4,6 +4,9 @@ config.json.bak
 config.json.tmp
 status.json
 status.json.tmp
+# The pair charts' series, rewritten every two seconds beside it.
+chart.json
+chart.json.tmp
 
 # The command queue and its replies - runtime, one per machine, and
 # recreated on every start (start.py --commands / --results). status.json

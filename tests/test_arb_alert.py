@@ -13,7 +13,6 @@ from mt5trader.config import PairConfig, TraderConfig
 from mt5trader.convert import ConvertedLeg, conversions_from_config
 from mt5trader.coordinator import Coordinator
 from mt5trader.fx import FxBook, manual_entry
-from mt5trader.notify import TelegramNotifier
 
 
 def crude(**arb):
@@ -150,15 +149,6 @@ def test_last_z_is_unmeasured_until_thirty_prices():
 
 # --- the engine: it alerts, and it never orders --------------------------
 
-class Phone:
-    def __init__(self):
-        self.messages = []
-
-    def send(self, text):
-        self.messages.append(text)
-        return True
-
-
 @pytest.fixture
 def engine(timeline):
     now = [1_700_000_000.0]
@@ -186,7 +176,6 @@ def engine(timeline):
             'mcx': FakeLeg(mcx)}
     coordinator = Coordinator(config, legs, clock=clock,
                               sleep=lambda s: None)
-    coordinator.notifier = Phone()
     coordinator.resolve_symbols()
     return coordinator, pair, cme, mcx, now
 
@@ -202,11 +191,11 @@ def test_the_engine_alerts_on_a_wide_gap_and_sends_no_order(engine, caplog):
         coordinator.poll_once()
     arb = coordinator.market[pair.key]['arb']
     assert arb['active'] and arb['direction'] == 'MCX_RICH'
-    assert len(coordinator.notifier.messages) == 1
-    assert 'MCX RICH' in coordinator.notifier.messages[0]
     assert any('ARBITRAGE ALERT' in r.message for r in caplog.records)
     snap = coordinator.snapshot()
+    assert len(snap['arb_events']) == 1
     assert snap['arb_events'][-1]['pair'] == pair.key
+    assert 'MCX RICH' in snap['arb_events'][-1]['text']
     # AN ALERT, NEVER AN ORDER.
     assert cme.sent == [] and mcx.sent == []
     assert coordinator.book.positions() == []
@@ -217,59 +206,35 @@ def test_control_with_the_alert_off_the_engine_says_nothing(engine):
     pair.arb_alert = False
     mcx.symbols['CRUDEOIL19NOV26FUT'].quote(8380.0, 8382.0)
     coordinator.poll_once()
-    assert coordinator.notifier.messages == []
+    assert coordinator.snapshot()['arb_events'] == []
 
 
-# --- Telegram ----------------------------------------------------------------
+# --- Telegram: the desk's bot carries the alert ---------------------------------
 
-class Reply:
-    def __init__(self, body):
-        self.body = body
-
-    def read(self):
-        return json.dumps(self.body).encode()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-
-def test_telegram_unset_is_quiet_and_sends_nothing():
-    sender = TelegramNotifier(token='', chat_id='')
-    assert not sender.configured
-    assert sender.send('x') is False
+def test_the_desk_bot_tells_a_new_arbitrage_alert_once():
+    from mt5trader.telegram import AlertWatch
+    watch = AlertWatch(clock=lambda: 1_700_000_000.0)
+    old = {'id': 1000, 'text': 'OLD gap'}
+    snap = {'engine': 'up', 'pairs': {}, 'arb_events': [old]}
+    assert not any('ARBITRAGE' in m for m in watch.check(snap, [], None))
+    fresh = {'id': 2000, 'text': 'Crude: MCX RICH — net edge 22.00. '
+                                 'Alert only — nothing was sent.'}
+    snap['arb_events'] = [old, fresh]
+    told = [m for m in watch.check(snap, [], None) if 'ARBITRAGE' in m]
+    assert len(told) == 1 and 'MCX RICH' in told[0] and 'OLD' not in told[0]
+    # Said once.
+    assert not any('ARBITRAGE' in m for m in watch.check(snap, [], None))
 
 
-def test_telegram_delivers_and_rate_limits():
-    calls = []
-    clock = [0.0]
-
-    def opener(request, timeout):
-        calls.append(json.loads(request.data))
-        return Reply({'ok': True})
-    sender = TelegramNotifier(token='T0K3N', chat_id='42', opener=opener,
-                              clock=lambda: clock[0], background=False)
-    assert sender.send('one') is True
-    assert sender.send('two') is False           # inside the gap
-    clock[0] += 5
-    assert sender.send('three') is True
-    assert [c['text'] for c in calls] == ['one', 'three']
-    assert calls[0]['chat_id'] == '42'
-
-
-def test_a_telegram_failure_never_leaks_the_token(caplog):
-    import urllib.error
-
-    def opener(request, timeout):
-        raise urllib.error.URLError(f'refused by {request.full_url}')
-    sender = TelegramNotifier(token='S3CR3T-TOKEN', chat_id='42',
-                              opener=opener, background=False)
-    with caplog.at_level(logging.WARNING):
-        assert sender.send('x') is False
-    assert 'S3CR3T-TOKEN' not in caplog.text
-    assert 'S3CR3T-TOKEN' not in (sender.last_error or '')
+def test_the_bot_writes_rupees_on_a_rupee_desk():
+    from mt5trader import telegram
+    try:
+        telegram.set_currency('INR')
+        assert telegram.money(5) == '\u20b9+5.00'
+        assert telegram.w3fee(1) == '-\u20b91.00'
+    finally:
+        telegram.set_currency('USD')
+    assert telegram.money(5) == '$+5.00'
 
 
 # --- the USDINR hedge, in the cost --------------------------------------------
@@ -323,7 +288,8 @@ def test_the_hedge_cost_can_be_what_stops_an_alert(engine):
     assert arb['hedge_lots'] == 88
     assert arb['hedge_per_unit'] == pytest.approx(11.44)
     assert arb['edge'] == pytest.approx(29.56, abs=0.01)
-    assert arb['active'] is False and coordinator.notifier.messages == []
+    assert arb['active'] is False
+    assert coordinator.snapshot()['arb_events'] == []
 
 
 def test_control_without_the_hedge_cost_the_same_gap_alerts(engine):
@@ -333,7 +299,7 @@ def test_control_without_the_hedge_cost_the_same_gap_alerts(engine):
     pair.fx_hedge_cost_per_lot = 0.0
     coordinator.poll_once()
     assert coordinator.market[pair.key]['arb']['active'] is True
-    text = coordinator.notifier.messages[-1]
+    text = coordinator.snapshot()['arb_events'][-1]['text']
     assert 'BUY 88 USDINR lots' in text and 'nothing was sent' in text
 
 

@@ -504,7 +504,8 @@ class PairExecutor:
                 got = result.get('filled_volume')
                 got = want if got is None else float(got)
                 closed.append({'ticket': ticket, 'volume': got,
-                               'price': result.get('price')})
+                               'price': result.get('price'),
+                               'sent': result.get('requested_price')})
                 if remaining is not None:
                     remaining -= got
             else:
@@ -771,6 +772,11 @@ class PairExecutor:
             # the SLIPPAGE, which is the difference between the two,
             # then stays None rather than becoming a flattering zero.
             filled_spread = closed_spread(results, pair.hedge_ratio)
+            # Each leg's close: the touch it was sent at, and the fill.
+            for leg, fill in (('a', position.leg_a), ('b', position.leg_b)):
+                if fill is not None:
+                    fill.exit_sent_price = _weighted(results, leg, 'sent')
+                    fill.exit_price = _weighted(results, leg, 'price')
             exit_spread = (decision_spread if filled_spread is None
                            else filled_spread)
             position.exit_spread = exit_spread
@@ -858,6 +864,9 @@ class PairExecutor:
                         order_ticket=fill_b.get('ticket'),
                         position_tickets=fill_b.get('position_tickets'),
                         contract_size=plan['leg_b_contract'], clock=self.clock)
+        # Each leg's own touch when it was sent - which leg slipped.
+        leg_a.sent_price = fill_a.get('requested_price')
+        leg_b.sent_price = fill_b.get('requested_price')
 
         # Anchored on the EXECUTED fills, never on the mid the decision
         # was taken at. Four rows agreeing to the cent proves they share
@@ -883,6 +892,28 @@ def _ticket_order(ticket):
         return (1, int(text), '')
     except (TypeError, ValueError):
         return (0, 0, text)
+
+
+def _weighted(results, leg, field):
+    """The volume-weighted `field` of one leg's closing fills, or None
+    when any of them did not report it."""
+    fills = (results.get(leg) or {}).get('closed') or ()
+    volume = sum(float(f.get('volume') or 0.0) for f in fills)
+    if not fills or volume <= 0 or any(f.get(field) is None for f in fills):
+        return None
+    return sum(float(f[field]) * float(f.get('volume') or 0.0)
+               for f in fills) / volume
+
+
+def leg_slip(side, sent, filled):
+    """How far ONE leg filled from the touch it was sent at, in its own
+    price points. Positive is a cost: a buy that paid more, a sell that
+    got less. None when either price is unknown."""
+    if sent is None or filled is None:
+        return None
+    side = getattr(side, 'value', side)
+    return (float(filled) - float(sent)) if side == 'BUY' \
+        else (float(sent) - float(filled))
 
 
 def closed_spread(results, hedge_ratio):

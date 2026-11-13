@@ -26,14 +26,30 @@ from.
   makes every live position look like an orphan; the reconciler
   auto-closes nothing until recovery says the book is complete, and
   never touches a position it cannot explain.
-- **No strategy and no loops.** No automatic entries or exits, nothing
-  that re-enters by itself, nothing that sends an order without a
-  person's click.
-- **One exception, and it is an ALERT:** `arbalert.py` may tell the
-  trader (screen, sound, Telegram) that a cross-exchange gap is unusually
-  wide after costs. It reads the snapshot and never orders — not even a
-  pre-filled one. Amended on the owner's decision; widening it into
-  execution needs the same.
+- **Automatic orders come ONLY from a ladder's Algo in LIVE.** LIVE is
+  per ladder, confirmed every time it is switched on, and OFF after
+  every restart; Signals (DRY_RUN) signals and sends nothing - the trader trades. While a ladder is
+  LIVE it takes NO new manual orders (closes still work), and LIVE is
+  refused on a ladder holding a manual position or a working order.
+  The Algo trades through the same executor a click uses: MARKET both
+  legs in, closes by TICKET. It never enters while it is collecting
+  candles, or past a filter it has switched on (edge, regime,
+  probability, half-life) — and a filter it cannot price BLOCKS. `algo.py`, `bands.py`, `algofilters.py`,
+  `algodesk.py`, `backtest.py`, `analysis.py` and `shadow.py` (the Algo's own code, run for the signal journal) decide and must not reach an order; `algoexec.py` is the one module
+  that sends, and only via the coordinator — `tests/test_algo.py`
+  fails the build otherwise. Nothing else places, modifies or cancels
+  an order by itself.
+
+- **Telegram is a remote desk, not a trader.** `telegram.py` goes
+  through the web app's own routes; only ids in
+  `TELEGRAM_ALLOWED_USERS` get an answer; every action is confirmed
+  (LIVE twice); it may send `set_algo`, `set_pair`, `flatten_pair` and
+  `kill` and nothing else — it never opens a position. The token lives
+  in `.env` and no URL carrying it is ever logged.
+- **The arbitrage ALERT is a reading, not an order.** `arbalert.py`
+  tells the trader (screen, sound, Telegram) that a cross-exchange gap
+  is unusually wide after costs; it reads the snapshot and never orders.
+  Only the Algo, in LIVE, sends anything by itself.
 
 ## Conventions that are easy to lose in a refactor
 
@@ -43,6 +59,10 @@ from.
   report while the money sits at the broker.
 - **Unmeasured is not zero.** Return None and render "—".
 - Guards may withhold an ORDER. **A guard must never prevent a close.**
+  The one agreed exception: the Algo's TAKE-PROFIT is confirmed on
+  prices read again before it is sent (`RECHECK_TAKE_PROFIT`) - a
+  target is an opportunity, not a risk, and the stop stands meanwhile.
+  Stops, the cutoff, kills and manual closes are never re-checked.
 - A refusal carries the broker's own words (`10027 AutoTrading disabled
   by client`), never "check the log".
 - `mt5trader/broker.py` is the only module allowed to import

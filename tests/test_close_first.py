@@ -485,32 +485,29 @@ def test_the_reducing_click_arms_as_the_TRADER_not_automation():
         'the click arms as automation, so the switch will sweep it')
 
 
-def test_autorouting_arms_as_AUTOMATION():
-    """The control. If `arm` defaulted the other way, standing
-    AutoRouting down would leave its own targets resting — and the
-    comment in work_auto_route is right that this has stood nothing
-    down."""
+def test_nothing_arms_as_automation_any_more():
+    """AutoRouting has been removed: `arm` defaults to the trader, and
+    no caller in the engine asks for automation."""
     import inspect
     from mt5trader.quoter import Quoter
-    from mt5trader.coordinator import Coordinator
+    from mt5trader import coordinator as coordinator_module
 
-    assert 'auto=True' in inspect.signature(Quoter.arm).__str__()
-    armed = inspect.getsource(Coordinator.work_auto_route)
-    assert 'auto=False' not in armed
+    assert 'auto=False' in str(inspect.signature(Quoter.arm))
+    assert 'auto=True' not in inspect.getsource(coordinator_module)
 
 
-def test_the_switch_uses_disarm_auto_and_the_orphan_sweep_does_not():
+def test_the_tidy_up_pulls_everything_for_a_gone_position_and_only_leftovers_otherwise():
     """A position that is GONE must have EVERY closing order pulled —
     trader's included — because one left behind fills and opens a naked
-    position. Only the AutoRouting switch is selective."""
+    position. For a live position only AutoRouting's leftovers go."""
     import inspect
     from mt5trader.coordinator import Coordinator
 
-    source = inspect.getsource(Coordinator.work_auto_route)
-    orphan, switch = source.split('AutoRouting was turned off')[0], source
+    source = inspect.getsource(Coordinator.tidy_closing_orders)
+    orphan, leftovers = source.split('AutoRouting has been removed')[0], source
     assert "disarm(order.position_id" in orphan, (
         'the orphan sweep no longer pulls everything')
-    assert 'disarm_auto(' in switch
+    assert 'disarm_auto(' in leftovers
 
 
 # -- what the click actually COVERED, not what it asked for ---------------

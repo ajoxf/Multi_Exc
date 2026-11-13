@@ -438,6 +438,49 @@ class BrokerSession:
                                         or 0.0)})
         return out or None
 
+    #: Minutes -> MT5's own timeframe constant name. Only these: they are
+    #: the candles the Algo offers.
+    TIMEFRAMES = {1: 'TIMEFRAME_M1', 5: 'TIMEFRAME_M5', 15: 'TIMEFRAME_M15',
+                  30: 'TIMEFRAME_M30', 60: 'TIMEFRAME_H1',
+                  240: 'TIMEFRAME_H4'}
+
+    def rates(self, symbol, timeframe_min, count):
+        """The last `count` bars of `symbol`, oldest first, or None.
+
+        `copy_rates_from_pos` from bar 0, which is the bar still
+        FORMING — the caller drops it, because a candle that has not
+        closed is not history. Each row carries the bar's own recorded
+        spread and the symbol's point, so the bid-priced close can be
+        moved to a mid by the caller.
+
+        `time` is the BROKER's wall clock encoded as an epoch, exactly
+        as a deal's is (see `server_time_offset_sec`): the caller moves
+        it to UTC with the measured offset. None — not [] — when the
+        terminal will not answer: no history is not an empty history.
+        """
+        if mt5 is None:
+            return None
+        name = self.TIMEFRAMES.get(int(timeframe_min))
+        frame = getattr(mt5, name, None) if name else None
+        if frame is None:
+            return None
+        self.ensure_symbol(symbol)
+        try:
+            raw = mt5.copy_rates_from_pos(symbol, frame, 0, int(count))
+        except Exception as e:
+            logging.warning('%s: no %s-minute bars from the terminal: %s',
+                            symbol, timeframe_min, e)
+            return None
+        if raw is None or len(raw) == 0:
+            logging.warning('%s: the terminal returned no %s-minute bars '
+                            '(%s)', symbol, timeframe_min, mt5.last_error())
+            return None
+        info = self.symbol_info(symbol)
+        point = float(getattr(info, 'point', 0.0) or 0.0)
+        return [{'time': int(row['time']), 'close': float(row['close']),
+                 'spread': int(row['spread']), 'point': point}
+                for row in raw]
+
     def session_stats(self, symbol):
         """This symbol's own session O/H/L and volume, as the TERMINAL
         reports them.

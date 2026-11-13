@@ -90,6 +90,7 @@ def test_a_fractional_leg_is_taken_as_typed_too(engine, pair):
 
 # -- a LIMIT fill crosses the other leg on the same ratio ------------------
 
+@pytest.mark.quote
 def test_a_fill_crosses_the_other_leg_on_the_TYPED_ratio(engine, pair, legs):
     """A click and a fill must cross the same pair of sizes, or the
     pair is hedged on one route and not on the other. The quoting leg
@@ -242,6 +243,7 @@ class Heard(logging.Handler):
         logging.getLogger().removeHandler(self)
 
 
+@pytest.mark.quote
 def test_an_order_that_cannot_be_sized_is_logged_not_only_shown(engine, pair):
     """It ran silently for the whole life of the module. An entry that
     could not be placed set `group.reason` and returned, so the reason

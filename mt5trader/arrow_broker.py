@@ -483,6 +483,20 @@ class ArrowSession:
                                time=int(stamp) if stamp else 0,
                                time_msc=int(stamp * 1000) if stamp else None)
 
+    def rates(self, symbol, timeframe_min, count):
+        """History bars for the Algo's warm-up and the backtest — NOT YET
+        read from Arrow, deliberately.
+
+        The SDK's candle endpoint, its fields and the clock its stamps
+        are in have not been seen against a live MCX account, and a bar
+        placed an hour wrong builds a band the Algo would trade on. So
+        this answers None — "no history" — which the Algo reads as
+        "collect candles from the live price", exactly as it does for an
+        MT5 terminal that will not answer. Wire it once the endpoint has
+        been confirmed with a live login.
+        """
+        return None
+
     def depth(self, symbol):
         q = self._quote(symbol)
         return (q or {}).get('depth') or None

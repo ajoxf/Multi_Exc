@@ -176,6 +176,7 @@ def test_found_tells_a_close_apart_from_an_absence(engine, pair, legs):
 
 # -- what it means for the money ------------------------------------------
 
+@pytest.mark.quote
 def test_an_unwind_does_not_report_FLAT_off_one_blink(engine, pair, legs):
     """The worst consumer of the old answer.
 

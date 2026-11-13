@@ -27,6 +27,7 @@
     derived: null,          // what MT5 says about the draft's two legs
     symbols: {},            // account -> last search result
     tests: {},              // account -> last connectivity answer
+    terminals: [],          // the MetaTrader 5s installed on this PC
     settings: null,         // the engine's tunables, with their defaults
     hot: [],                // ...and which of them apply without a restart
     connection: null,       // is the SYSTEM connected, in one answer
@@ -71,7 +72,7 @@
     return Promise.all([
       api('/api/accounts'), api('/api/pairs'), api('/api/settings'),
       api('/api/lock'), api('/api/fx'), api('/api/units'),
-      api('/api/notify')
+      api('/api/notify'), api('/api/terminals')
     ]).then(function (results) {
       local.telegram = !!(results[6] && results[6].body &&
                           results[6].body.telegram);
@@ -82,6 +83,7 @@
       // The exchange rates cross-currency pairs convert through.
       local.fx = (results[4] && results[4].body && results[4].body.rates) || {};
       local.accounts = results[0].body.accounts || [];
+      local.terminals = ((results[7] || {}).body || {}).terminals || [];
       local.nextPort = results[0].body.next_free_port || local.nextPort;
       local.pairs = results[1].body.pairs || {};
       local.settings = results[2].body.settings || {};
@@ -216,6 +218,44 @@
     return started ? draft : null;
   }
 
+  function accountEdits(section) {
+    // What has been CHANGED but not saved on the EXISTING account rows,
+    // keyed by account and field, or null.
+    //
+    // The same hazard as the new row: the connection poll repaints this
+    // table every five seconds from the SAVED accounts. A MetaTrader
+    // picked from the list - or a path pasted - and then the pointer
+    // moved toward Save, and the row went back to the old path under
+    // it. So an edit is carried across the repaint until it is saved.
+    if (!section) { return null; }
+    var edits = null;
+    Array.prototype.forEach.call(
+      section.querySelectorAll('tr[data-account]:not(.new)'), function (row) {
+        Array.prototype.forEach.call(
+          row.querySelectorAll('input'), function (input) {
+            if (input.dataset.rendered === undefined) { return; }
+            if (input.value === input.dataset.rendered) { return; }
+            edits = edits || {};
+            edits[row.dataset.account + '|' + input.className] = input.value;
+          });
+      });
+    return edits;
+  }
+
+  function restoreAccountEdits(section, edits) {
+    if (!edits || !section) { return; }
+    Object.keys(edits).forEach(function (key) {
+      var cut = key.indexOf('|');
+      var name = key.slice(0, cut), cls = key.slice(cut + 1);
+      Array.prototype.forEach.call(
+        section.querySelectorAll('tr[data-account]'), function (row) {
+          if (row.dataset.account !== name) { return; }
+          var input = row.querySelector('.' + cls.split(' ')[0]);
+          if (input) { input.value = edits[key]; }
+        });
+    });
+  }
+
   function restoreNewAccount(section, draft) {
     if (!draft || !section) { return; }
     var row = section.querySelector('tr.new');
@@ -304,10 +344,12 @@
     // for their half of this, so each is a no-op outside its own table.
     var draft = newAccountDraft(section);
     var edited = editedFields(section);
+    var accountEdited = accountEdits(section);
     section.innerHTML = build();
     stampRendered(section);
     restoreNewAccount(section, draft);
     restoreEdited(section, edited);
+    restoreAccountEdits(section, accountEdited);
   }
 
   function isTyping(section) {
@@ -480,7 +522,8 @@
   }
 
   function accountRow(account) {
-    var clashes = [account.endpoint_clash, account.login_clash,
+    var clashes = [account.terminal_missing, account.endpoint_clash,
+                   account.login_clash,
                    account.terminal_clash].filter(Boolean);
     var test = local.tests[account.name];
     var kind = account.kind === 'arrow' ? 'arrow' : 'mt5';
@@ -496,7 +539,7 @@
       '</select></td>';
     html += '<td><input class="f-terminal mt5-only" value="' +
       escape(account.terminal_path) + '" placeholder="blank = attach to ' +
-      'whichever terminal is open">' +
+      'whichever terminal is open">' + terminalPicker(account) +
       '<input class="f-appid arrow-only" value="' + escape(account.app_id) +
       '" placeholder="Arrow app id"></td>';
     html += '<td><input class="f-login mt5-only" value="' +
@@ -583,14 +626,15 @@
     });
     html += '</tbody></table>';
     // Where the arbitrage alerts go besides this screen.
-    html += '<div class="telegram-row">Arbitrage alerts to Telegram: ' +
+    html += '<div class="telegram-row">Telegram (the desk bot — signals, ' +
+      'trades and arbitrage alerts): ' +
       (local.telegram
-        ? '<b>set up</b> <button class="btn tiny test-telegram">Send test' +
-          '</button>'
+        ? '<b>set up</b> — message the bot to use it'
         : '<b class="problem-text">not set up</b> — put TELEGRAM_BOT_TOKEN ' +
-          'and TELEGRAM_CHAT_ID in .env (docs/SETUP.md). Alerts still show ' +
-          'here and sound.') +
-      ' Each pair\'s alert is switched on in its ladder ⚙ settings.</div>';
+          'and TELEGRAM_ALLOWED_USERS in .env (docs/SETUP.md). Alerts still ' +
+          'show here and sound.') +
+      ' Each pair\'s arbitrage alert is switched on in its ladder ⚙ ' +
+      'settings.</div>';
     return html;
   }
 
@@ -609,6 +653,30 @@
                'next poll', 'ok');
       refresh();
     });
+  }
+
+  function terminalPicker(account) {
+    // PICK, don't type. The MetaTrader 5s actually installed on this
+    // PC, read off the disk by the server. A path typed by hand is how
+    // a desk ended up unable to start: pasted with the quotes Windows'
+    // "Copy as path" adds, the file was exactly where it said and still
+    // could not be found. Choosing from this list fills the box; Save
+    // then saves it, and the engine restarts by itself.
+    if (!local.terminals.length) { return ''; }
+    var current = String(account.terminal_path || '').toLowerCase();
+    var html = '<select class="f-terminal-pick mt5-only" title="The MetaTrader 5 ' +
+      'installations found on this PC">' +
+      '<option value="">pick an installed MetaTrader 5\u2026</option>';
+    local.terminals.forEach(function (terminal) {
+      var mine = terminal.path.toLowerCase() === current;
+      var other = terminal.used_by && terminal.used_by !== account.name;
+      html += '<option value="' + escape(terminal.path) + '"' +
+        (mine ? ' selected' : '') + '>' + escape(terminal.folder) +
+        (mine ? ' \u2014 this account' :
+          (other ? ' \u2014 used by ' + escape(terminal.used_by) : '')) +
+        '</option>';
+    });
+    return html + '</select>';
   }
 
   function checklistHtml(result) {
@@ -1299,6 +1367,15 @@
     if (e.target.classList.contains('f-kind')) {
       kindClass(e.target.closest('tr'));
     }
+    if (e.target.classList.contains('f-terminal-pick')) {
+      var row = e.target.closest('tr');
+      var box = row && row.querySelector('.f-terminal');
+      if (box && e.target.value) {
+        box.value = e.target.value;
+        UI.toast('picked ' + e.target.options[e.target.selectedIndex].text +
+                 ' \u2014 press Save to use it', 'ok');
+      }
+    }
   }
 
   function savePin(panel) {
@@ -1353,12 +1430,6 @@
     }
     if (button.classList.contains('save-fx')) {
       return saveFx(row);
-    }
-    if (button.classList.contains('test-telegram')) {
-      return api('/api/notify/test', {method: 'POST'}).then(function (r) {
-        UI.toast(r.ok ? 'test message sent to Telegram'
-                      : r.body.error, r.ok ? 'ok' : undefined);
-      });
     }
     if (button.classList.contains('use-clip')) {
       readDraft();
@@ -1586,8 +1657,19 @@
         UI.toast(result.body.error);
         return;
       }
-      UI.toast('saved ' + name + ' — restart the launcher for it to take ' +
-               'effect', 'ok');
+      // Saved: what is in the row is no longer an unsaved edit, so the
+      // repaint below shows what the SERVER kept - the path cleaned of
+      // any quotes - instead of carrying the pasted text back over it.
+      Array.prototype.forEach.call(row.querySelectorAll('input'),
+        function (input) { input.dataset.rendered = input.value; });
+      if (result.body.terminal_missing) {
+        // Saved, and still not launchable: say so plainly, not 'ok'.
+        UI.toast('saved ' + name + ' \u2014 but ' +
+                 result.body.terminal_missing);
+      } else {
+        UI.toast('saved ' + name + ' \u2014 the engine restarts by itself ' +
+                 'to pick it up', 'ok');
+      }
       // This row has BECOME an account. Clear it, or the draft the
       // repaint carries across would reappear in the next blank row.
       if (!row.dataset.account) {
@@ -1597,6 +1679,9 @@
         });
       }
       refresh();
+      // The readiness box too, now: it would otherwise go on saying
+      // the old fault for up to one cycle after it was fixed.
+      refreshConnection();
     });
   }
 

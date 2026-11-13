@@ -172,14 +172,17 @@ class CommandRunner:
         #: withheld. Blank = the desk-wide MAX_QUOTE_AGE_SEC.
         'max_quote_age_sec': (
             lambda v: float(v) if v not in (None, '') else None),
-        #: AutoRouting: on a fill, rest a working order to close at the
-        #: take-profit. Default OFF, and it arms a target and NO STOP.
-        'auto_route': bool,
         #: Which ALGO this ladder runs — one at a time, NONE by
         #: default. It measures and says what it would do; it does not
         #: trade, and a click on the ladder is unaffected either way.
+        #: Routed to `set_algo`: ALGO is a switch on the running engine,
+        #: not a field.
         'algo': str,
         'algo_window': bool,
+        #: The Algo's own numbers for this ladder (entry z, candles,
+        #: gates, optional exits). Blanks mean the default.
+        'algo_params': lambda v: {k: x for k, x in dict(v or {}).items()
+                                  if x not in (None, '')},
         #: Spot vs future, calendar, or two different instruments. It
         #: decides whether a fair spread applies at all, and it is
         #: DECLARED: two expiries do not make a calendar.
@@ -332,6 +335,39 @@ class CommandRunner:
             applied[name] = self.coordinator.config.settings[name]
         return {'applied': applied}
 
+    def _do_algo_backtest(self, payload):
+        """Replay history through one ladder's Algo. Sends nothing."""
+        return self.coordinator.algo_backtest(payload['pair'],
+                                              payload.get('days', 5))
+
+    def _do_backfill_signals(self, payload):
+        """DERIVE the last N days of signals from MT5's own bars.
+
+        A reading, and it says so: the rows it writes are stamped
+        REPLAY. It sends nothing — `backtest.run` cannot reach an
+        order, and this only writes down what it answers.
+        """
+        return self.coordinator.backfill_signals(
+            payload.get('pair') or None, payload.get('days'))
+
+    def _do_reset_excursions(self, payload):
+        """Zero the Analysis tab's z-score excursion counters."""
+        return self.coordinator.reset_excursions(payload.get('pair') or None)
+
+    def _do_set_algo(self, payload):
+        """NONE / FAIR_SPREAD / ALGO for one ladder, and ALGO's mode.
+
+        ALGO switches the ladder's Algo ON in the running engine, off
+        again after a restart. `mode` DRY_RUN signals and records; LIVE
+        trades, and needs `confirmed` every time. Leaving LIVE while it
+        holds a position needs `off_action`: 'close' or 'manual'.
+        Refused in words — never silently ignored.
+        """
+        return self.coordinator.set_algo(
+            payload['pair'], payload.get('algo'), mode=payload.get('mode'),
+            confirmed=bool(payload.get('confirmed')),
+            off_action=payload.get('off_action'))
+
     def _do_set_pair(self, payload):
         """Mode / TIF / overnight / increment / quantity, per ladder.
 
@@ -346,6 +382,10 @@ class CommandRunner:
             coerce = self.EDITABLE.get(name)
             if coerce is None:
                 continue          # not a per-ladder setting; ignored
+            if name == 'algo':
+                answer = self.coordinator.set_algo(pair.key, value)
+                applied[name] = answer.get('algo') or answer.get('reason')
+                continue
             # The old name for the window toggle still works, so a page
             # that has not been reloaded goes on working.
             field = 'algo_window' if name == 'show_fair_window' else name

@@ -438,3 +438,10 @@ def test_a_symbol_asked_for_the_first_time_is_priced_at_once(arrow):
     assert session.symbol_tick('CRUDEOIL19NOV25FUT') is not None
     # Inside the batch window, a DIFFERENT symbol is still priced.
     assert session.symbol_tick('GOLD05DEC25FUT') is not None
+
+
+def test_arrow_history_is_none_until_its_candle_endpoint_is_confirmed(arrow):
+    """None, not [] — the Algo then collects from the live price."""
+    session, _ = arrow
+    assert session.rates('CRUDEOIL19NOV25FUT', 15, 100) is None
+    assert LocalLeg(session).rates('CRUDEOIL19NOV25FUT', 15, 100) is None

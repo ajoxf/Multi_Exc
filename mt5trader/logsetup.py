@@ -26,6 +26,7 @@ it always did.
 import logging
 import logging.handlers
 import os
+import re
 
 #: Where they go, beside the code, next to config.json - the folder an
 #: operator is already being asked to look in.
@@ -88,5 +89,59 @@ def setup(name, root=None, level=logging.INFO, max_bytes=MAX_BYTES,
     # CRITICAL one.
     if logger.level == logging.NOTSET or logger.level > level:
         logger.setLevel(level)
+    _problems_file(logger, directory, name, max_bytes, backups)
     logging.info('logging to %s', path)
     return path
+
+
+def _problems_file(logger, directory, name, max_bytes, backups):
+    """WARNING and above only, in a file of its own: `<name>.problems.log`.
+
+    The full log is the record of everything; this is the one to OPEN.
+    A problem written between thousands of routine lines is a problem
+    nobody finds — the operator's complaint was exactly that.
+    """
+    path = os.path.join(directory, f'{name}.problems.log')
+    for existing in logger.handlers:
+        if getattr(existing, '_mt5trader_log', None) == path:
+            return path
+    try:
+        handler = logging.handlers.RotatingFileHandler(
+            path, maxBytes=max_bytes, backupCount=backups,
+            encoding='utf-8', delay=True)
+    except Exception:
+        return None
+    handler.setFormatter(logging.Formatter(FORMAT, datefmt=DATEFMT))
+    handler.setLevel(logging.WARNING)
+    handler._mt5trader_log = path
+    logger.addHandler(handler)
+    return path
+
+
+#: A request line the web server logs, for a GET that succeeded. The
+#: server COLOURS some of them (a 304 arrives as '"\x1b[36mGET ...'),
+#: so a colour code may sit between the quote and the verb.
+_ROUTINE_GET = re.compile(r'"(?:\x1b\[[0-9;]*m)*GET [^"]*" [23]\d\d\b')
+
+
+class _QuietPolling(logging.Filter):
+    """Drop the web server's line for every successful GET.
+
+    The screen polls three times a second, and each poll was a line in
+    the console and in web.log — so many that an error between them
+    could not be found. Button presses (POST) and every failed request
+    are still logged.
+    """
+
+    def filter(self, record):
+        try:
+            return not _ROUTINE_GET.search(record.getMessage())
+        except Exception:
+            return True
+
+
+def quiet_polling():
+    """Install the filter on the web server's request log. Idempotent."""
+    logger = logging.getLogger('werkzeug')
+    if not any(isinstance(f, _QuietPolling) for f in logger.filters):
+        logger.addFilter(_QuietPolling())

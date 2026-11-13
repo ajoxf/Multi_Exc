@@ -387,14 +387,14 @@ def test_the_per_ladder_settings_apply_without_a_restart(config, pair, legs,
     coordinator = Coordinator(config, legs)
     coordinator.start()
     coordinator.poll_once()
-    assert pair.auto_route is False
+    assert pair.algo_window is False
 
     path.write_text(json.dumps({'pairs': {pair.key: {
-        'auto_route': True, 'tp_target_pct_of_margin': 5.0,
+        'algo_window': True, 'tp_target_pct_of_margin': 5.0,
         'order_type': 'MARKET', 'overnight': 'EXIT_IF_PROFIT'}}}))
     coordinator.poll_once()
 
-    assert pair.auto_route is True
+    assert pair.algo_window is True
     assert pair.tp_target_pct_of_margin == 5.0
     assert pair.order_type.value == 'MARKET'
     assert pair.overnight.value == 'EXIT_IF_PROFIT'
@@ -425,7 +425,9 @@ def test_the_engine_publishes_the_fair_window_setting(config, pair, legs,
                                              'auto_route': True}})
 
     assert answer['applied']['algo_window'] is True
-    assert answer['applied']['auto_route'] is True
+    # AutoRouting has been removed: a page still sending it changes
+    # nothing, rather than failing the whole save.
+    assert 'auto_route' not in answer['applied']
     coordinator.poll_once()
     assert coordinator.snapshot()['pairs'][pair.key][
         'show_fair_window'] is True
