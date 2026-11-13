@@ -2144,7 +2144,7 @@ class Coordinator:
         params = algo_module.clean_params(pair.algo_params)
         rows, note = self.algos.history(pair, days)
         if not rows:
-            return {'ok': False, 'reason': note or 'no history from MT5'}
+            return {'ok': False, 'reason': note or 'no history from the brokers'}
         md = self.market.get(pair_key)
         if not md or md.get('long_spread') is None \
                 or md.get('short_spread') is None:

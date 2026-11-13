@@ -90,7 +90,7 @@ own, in the log, and on Telegram. It fires when BOTH are true:
   (the dollar leg's notional in NSE lots — $88,400 = 88 lots — times the
   round-trip cost per lot you type), and any per-unit extra (CTT, fees). "Normal" is typed per pair: about 0 for crude, the usual
   duty premium for gold and silver.
-* the spread is unusual against its own last five minutes (z-score past
+* the spread is unusual against its own last five minutes (z past
   the sigmas set; 0 turns this test off).
 
 A stale leg, a desynced jump or a stale USDINR suppresses it — that is
@@ -102,7 +102,7 @@ sends an order**; the trader decides and clicks. Set up per ladder under
 ### Live charts
 
 Each ladder has Mirror's chart: its **Chart** button on the title bar
-opens and closes it — the Algo's z-score between its entry and stop
+opens and closes it — the Algo's z between its entry and stop
 lines, in candles, and the spread over time. These are the live graphs
 arrow-statarb shows. A reading only.
 
@@ -373,7 +373,7 @@ as before — it adds a reading, not a lock; LIVE takes the ladder over (below).
   max-hold at the median minute winners peaked); a *what-if-held* shadow that
   keeps marking a position for an hour after any exit that was not its target
   (did it come back to break-even? to the target?); the Algo's backtest for
-  the chosen ladder; z-score excursions on the Algo's band (touches of ±2σ and
+  the chosen ladder; z excursions on the Algo's band (touches of ±2σ and
   ±3σ, and 2σ stretches that came back to the mean); and the trade journal
   with the Algo's z at both ends. Built from what is recorded — it sends
   nothing. Best/worst points and shadows are kept from this version on.

@@ -20,7 +20,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
@@ -89,6 +89,53 @@ def main():
     exchange.book = {'CRUDEOIL18DEC26FUT': (6221.0, 6223.0),
                      'GOLD05FEB27FUT': (121452.0, 121470.0),
                      'SILVER05MAR27FUT': (145810.0, 145842.0)}
+    # HISTORY, so the Algo starts from bars rather than collecting them:
+    # a random walk ending at today's price, on each broker's own terms —
+    # MT5 bars stamped on the broker's wall clock with a bid close, Arrow
+    # candles as ISO times in IST with prices in PAISE.
+    def walk(end, step, n, seed):
+        r = random.Random(seed)
+        out = [end]
+        for _ in range(n - 1):
+            out.append(out[-1] - r.choice((-2, -1, 0, 1, 2)) * step)
+        return out[::-1]
+
+    def mt5_rates(symbol, timeframe_min, count):
+        sym = cme.symbols.get(symbol)
+        if sym is None:
+            return None
+        now = int(time.time()) // (timeframe_min * 60) * timeframe_min * 60
+        closes = walk(sym.bid, sym.tick_size * 3, int(count), hash(symbol) % 97)
+        return [{'time': now - (len(closes) - 1 - i) * timeframe_min * 60
+                 + int(cme.server_offset_sec or 0),
+                 'close': c, 'spread': 2, 'point': sym.tick_size}
+                for i, c in enumerate(closes)]
+    cme.rates = mt5_rates
+
+    tokens = {i['Token']: i['TradingSymbol'] for i in exchange.instruments}
+    steps = {'15min': 900, '5min': 300, 'min': 60, '30min': 1800,
+             'hour': 3600}
+
+    def candle_data(exch, token, interval, from_timestamp, to_timestamp,
+                    oi=False):
+        symbol = tokens.get(str(token))
+        if symbol not in exchange.book or interval not in steps:
+            return []
+        step = steps[interval]
+        bid, ask = exchange.book[symbol]
+        closes = walk((bid + ask) / 2.0, 1 if bid < 10000 else 5, 400,
+                      int(token))
+        now = int(time.time()) // step * step
+        rows = []
+        for i, c in enumerate(closes):
+            at = now - (len(closes) - 1 - i) * step
+            ist = datetime.fromtimestamp(at, tz=timezone.utc) \
+                .astimezone(timezone(timedelta(hours=5, minutes=30)))
+            rows.append([ist.strftime('%Y-%m-%dT%H:%M:%S%z'),
+                         c * 100, c * 100, c * 100, c * 100, 10])
+        return rows
+    exchange.candle_data = candle_data
+
     arrow = ArrowSession(cfg.accounts['mcx'], sdk=make_sdk(),
                          ledger_path=os.path.join(RUN, 'data',
                                                   'arrow-mcx.ledger.json'))

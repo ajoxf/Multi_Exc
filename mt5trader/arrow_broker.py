@@ -49,7 +49,7 @@ import os
 import re
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from . import atomicfile
@@ -157,7 +157,13 @@ class ArrowSession:
                                'pip install pyarrow-client')
             logging.error("[%s] %s", acct.name, self.last_error)
             return False
-        exchange = getattr(self.sdk.Exchange, self.exchange_name, None)
+        # The SDK (1.8) lists MCX AND MCXFO, and says MCXFO is the one for
+        # orders, quotes and margin — MCX is for permission checks and
+        # the instrument download. So the futures segment wins.
+        exchange = (getattr(self.sdk.Exchange, 'MCXFO', None)
+                    if self.exchange_name == 'MCX' else None)
+        if exchange is None:
+            exchange = getattr(self.sdk.Exchange, self.exchange_name, None)
         if exchange is None:
             try:
                 exchange = self.sdk.Exchange(self.exchange_name)
@@ -484,18 +490,97 @@ class ArrowSession:
                                time_msc=int(stamp * 1000) if stamp else None)
 
     def rates(self, symbol, timeframe_min, count):
-        """History bars for the Algo's warm-up and the backtest — NOT YET
-        read from Arrow, deliberately.
+        """History bars for the Algo's warm-up and the backtest, from
+        Arrow's historical API — oldest first, in the shape MT5's are.
 
-        The SDK's candle endpoint, its fields and the clock its stamps
-        are in have not been seen against a live MCX account, and a bar
-        placed an hour wrong builds a band the Algo would trade on. So
-        this answers None — "no history" — which the Algo reads as
-        "collect candles from the live price", exactly as it does for an
-        MT5 terminal that will not answer. Wire it once the endpoint has
-        been confirmed with a live login.
+            client.candle_data(exchange, token, interval, from, to)
+            rows: [timestamp (ISO, +0530), open, high, low, close, volume]
+
+        THREE THINGS ARE NOT LIKE MT5, and each is handled where a wrong
+        answer would build a band the Algo trades on:
+
+        * PRICES IN PAISE. Divided by `candle_price_divisor` (100) — and
+          the newest bar is CHECKED against the live book: off by more
+          than 10%, it is not history, it is a scale nobody confirmed,
+          and the answer is None.
+        * THE CLOSE IS A TRADE, not a bid. There is no book in history,
+          so it stands as the bar's mid (spread 0). The live spread is
+          still built from the mid of the book; this only warms the band.
+        * TIME is ISO with its offset; it is returned as the BROKER's
+          wall clock encoded as an epoch (UTC + 05:30), the convention
+          MT5 bars use, so the caller places both legs' bars alike.
+
+        None — never [] — for anything that is not usable history: an
+        interval Arrow has no name for, no token, a refused range, an
+        empty answer, a scale that fails the check. The Algo then says
+        "collecting from the live price", as it does for a dark MT5.
         """
-        return None
+        interval = CANDLE_INTERVALS.get(int(timeframe_min))
+        fetch = getattr(self.client, 'candle_data', None) if self.client else None
+        rec = self._instrument(symbol)
+        token = _dig(rec, 'Token', 'token', 'instrument_token')
+        if interval is None or fetch is None or token in (None, ''):
+            return None
+        # Enough calendar time for `count` bars on a market that trades
+        # ~14.5 hours a weekday, plus a margin for holidays.
+        trading_min_per_day = 14.5 * 60 * 5 / 7.0
+        days = (int(count) + 2) * int(timeframe_min) / trading_min_per_day
+        days = min(max(days * 1.3 + 2, 2), CANDLE_MAX_DAYS)
+        now_ist = datetime.fromtimestamp(self.clock() + IST_OFFSET_SEC,
+                                         tz=timezone.utc).replace(tzinfo=None)
+        start = now_ist - timedelta(days=days)
+        rows = None
+        for exchange in self._candle_exchanges():
+            try:
+                reply = fetch(exchange, str(token), interval,
+                              start.strftime('%Y-%m-%dT%H:%M:%S'),
+                              now_ist.strftime('%Y-%m-%dT%H:%M:%S'))
+            except Exception as e:
+                logging.warning("%s: Arrow candle history refused on %s — %s",
+                                symbol, getattr(exchange, 'value', exchange),
+                                _sdk_error(e))
+                continue
+            rows = _candle_rows(reply)
+            if rows:
+                break
+        if not rows:
+            return None
+        divisor = float(getattr(self.account, 'candle_price_divisor', None)
+                        or CANDLE_PRICE_DIVISOR)
+        bars = []
+        for row in rows:
+            stamp = _iso_epoch(row[0])
+            close = _num(row[4])
+            if stamp is None or close is None:
+                continue
+            bars.append({'time': int(stamp + IST_OFFSET_SEC),
+                         'close': close / divisor, 'spread': 0,
+                         'point': self._tick_size(symbol) or 0.0})
+        bars.sort(key=lambda bar: bar['time'])
+        if not bars:
+            return None
+        # THE SCALE CHECK: the newest close against the live book.
+        live = self.symbol_tick(symbol)
+        if live is not None:
+            mid = (live.bid + live.ask) / 2.0
+            if mid and abs(bars[-1]['close'] / mid - 1.0) > \
+                    CANDLE_SCALE_TOLERANCE:
+                logging.error(
+                    "%s: Arrow's history ends at %g against a live mid of %g "
+                    "— not the same scale (paise vs rupees?), so it is not "
+                    "used; set candle_price_divisor on the account if Arrow "
+                    "answers in rupees", symbol, bars[-1]['close'], mid)
+                return None
+        return bars[-int(count):]
+
+    def _candle_exchanges(self):
+        """MCXFO first (what the SDK asks for on a future), then MCX."""
+        out = []
+        for name in (self.exchange_name + 'FO', self.exchange_name):
+            found = getattr(self.sdk.Exchange, name, None) if self.sdk else None
+            if found is not None and found not in out:
+                out.append(found)
+        return out
 
     def depth(self, symbol):
         q = self._quote(symbol)
@@ -1257,6 +1342,53 @@ class ArrowSession:
                     'position_id': None, 'magic': None, 'is_bot': False,
                     'comment': '', 'server_offset_sec': IST_OFFSET_SEC})
         return rows
+
+
+#: Arrow's interval names, by minutes. "min", never "1".
+CANDLE_INTERVALS = {1: 'min', 3: '3min', 5: '5min', 10: '10min',
+                    15: '15min', 30: '30min', 60: 'hour', 120: '2hours',
+                    180: '3hours', 240: '4hours', 1440: 'day'}
+#: Arrow's candle prices are paise.
+CANDLE_PRICE_DIVISOR = 100.0
+#: How far the newest bar may sit from the live mid before the history
+#: is called a scale nobody confirmed.
+CANDLE_SCALE_TOLERANCE = 0.10
+#: The widest range asked for in one call.
+CANDLE_MAX_DAYS = 60
+
+
+def _candle_rows(reply):
+    """The candle rows wherever this build put them: a bare list, or
+    under data / candles. Each row a list [time, o, h, l, c, v, ...]."""
+    if isinstance(reply, dict):
+        for key in ('data', 'candles', 'result'):
+            if key in reply:
+                return _candle_rows(reply[key])
+        return []
+    if isinstance(reply, list):
+        return [r for r in reply
+                if isinstance(r, (list, tuple)) and len(r) >= 5]
+    return []
+
+
+def _iso_epoch(value):
+    """A candle's stamp as a UTC epoch: ISO with an offset
+    (2023-05-02T09:15:00+0530), or an epoch in seconds or ms."""
+    if isinstance(value, (int, float)):
+        return float(value) / (1000.0 if value > 1e11 else 1.0)
+    text = str(value or '').strip()
+    for fmt in ('%Y-%m-%dT%H:%M:%S%z', '%Y-%m-%d %H:%M:%S%z',
+                '%Y-%m-%dT%H:%M:%S.%f%z'):
+        try:
+            return datetime.strptime(text, fmt).timestamp()
+        except ValueError:
+            continue
+    try:
+        # No offset given: the exchange's own clock, IST.
+        naive = datetime.strptime(text[:19], '%Y-%m-%dT%H:%M:%S')
+        return naive.replace(tzinfo=timezone.utc).timestamp() - IST_OFFSET_SEC
+    except ValueError:
+        return None
 
 
 def _order_id(rec):

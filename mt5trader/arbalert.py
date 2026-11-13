@@ -170,7 +170,7 @@ class ArbWatch:
                            f'margin')
         if z_needed and z_needed > 0:
             if z is None:
-                reasons.append('not enough history for a z-score yet')
+                reasons.append('not enough history for z yet')
             elif (direction == 'MCX_RICH' and z < z_needed) or \
                     (direction == 'MCX_CHEAP' and z > -z_needed):
                 reasons.append(f'z {z:+.2f} is inside ±{z_needed:g}')

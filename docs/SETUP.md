@@ -112,7 +112,7 @@ Each ladder's title bar has an **ALGO** switch:
 
 - **Off** — manual: you click, as always.
 - **Signals** — the Algo works out entries and exits from the spread's
-  z-score and tells you (screen, sound, Telegram). It sends nothing;
+  z and tells you (screen, sound, Telegram). It sends nothing;
   you trade.
 - **LIVE** — the Algo trades that ladder by its rules: MARKET both legs
   in, closes by ticket. Confirmed every time it is switched on, OFF
@@ -124,11 +124,20 @@ Its settings (entry z, candle timeframe, filters, stops) are on the
 ladder's ⚙. Run it in **Signals** first, and LIVE only after
 `pytest tests/ -q` passes.
 
-On these pairs the Algo's price history comes from MT5 for leg A
-(restated in rupees at today's USDINR) but **not yet from Arrow** for
-leg B: until Arrow's candle endpoint has been confirmed on a live
-login, the Algo builds its candles from the live price after it is
-switched on, and says so ("collecting from the live price").
+On these pairs the Algo starts from history on both legs: MT5's bars
+for leg A (restated in rupees at today's USDINR) and Arrow's candles for
+leg B. Three things to know about Arrow's history:
+
+- Arrow sends candle prices in paise; they are divided by 100, and the
+  newest bar is checked against the live MCX price. If it is more than
+  10% away the history is not used and the Algo collects from the live
+  price instead — set `candle_price_divisor` to 1 on the Arrow account
+  only if your Arrow build answers in rupees.
+- A candle's close is the last traded price, not the middle of the
+  order book (history has no book). It is used only to warm the Algo's
+  band; live decisions still use the middle of the book.
+- If Arrow refuses the date range or sends nothing, the Algo says
+  "collecting from the live price" and builds its candles as it goes.
 
 ## Running the pieces separately (while setting up)
 

@@ -376,7 +376,8 @@ class AccountConfig:
                  password_env="", server=None, endpoint=None, kind='mt5',
                  app_id=None, user_id=None, api_secret_env="",
                  totp_secret_env="", exchange=None, product=None,
-                 quantity_in_lots=False, max_lots=None, price_divisor=None):
+                 quantity_in_lots=False, max_lots=None, price_divisor=None,
+                 candle_price_divisor=None):
         self.name = name
         self.kind = (str(kind or 'mt5').strip().lower())
         if self.kind not in ACCOUNT_KINDS:
@@ -409,6 +410,9 @@ class AccountConfig:
         self.quantity_in_lots = bool(quantity_in_lots)
         self.max_lots = _blank_to_none(max_lots)
         self.price_divisor = _blank_to_none(price_divisor)
+        #: Arrow's candle history is in PAISE (100). Checked against the
+        #: live book either way; set 1 only if a build answers in rupees.
+        self.candle_price_divisor = _blank_to_none(candle_price_divisor)
 
     @property
     def password(self):
@@ -439,7 +443,8 @@ class AccountConfig:
                         'exchange': self.exchange, 'product': self.product,
                         'quantity_in_lots': self.quantity_in_lots,
                         'max_lots': self.max_lots,
-                        'price_divisor': self.price_divisor})
+                        'price_divisor': self.price_divisor,
+                        'candle_price_divisor': self.candle_price_divisor})
         return out
 
     @classmethod
@@ -460,7 +465,8 @@ class AccountConfig:
                    exchange=raw.get('exchange'), product=raw.get('product'),
                    quantity_in_lots=raw.get('quantity_in_lots'),
                    max_lots=raw.get('max_lots'),
-                   price_divisor=raw.get('price_divisor'))
+                   price_divisor=raw.get('price_divisor'),
+                   candle_price_divisor=raw.get('candle_price_divisor'))
 
 
 #: The brokers a leg runner can talk to.

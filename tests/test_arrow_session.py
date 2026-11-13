@@ -18,10 +18,12 @@ from mt5trader.legs import LocalLeg
 from mt5trader.models import OrderSide
 
 
-def make_sdk(with_mcx=True, ltp_only=False):
+def make_sdk(with_mcx=True, ltp_only=False, with_mcxfo=False):
     members = {'NSE': 'NSE', 'NFO': 'NFO'}
     if with_mcx:
         members['MCX'] = 'MCX'
+    if with_mcxfo:
+        members['MCXFO'] = 'MCXFO'
     sdk = SimpleNamespace(
         Exchange=enum.Enum('Exchange', members),
         OrderType=enum.Enum('OrderType', {'MKT': 'MKT', 'LMT': 'LMT'}),
@@ -62,6 +64,13 @@ class FakeExchange:
         self.fail_positions = False
         self.fill_market = True
         self.before_send = None
+        self.candle_calls = []
+        self.candle_error = None
+        # Arrow's rows: ISO time with its offset, OHLCV, prices in PAISE.
+        self.candles = [
+            ['2025-11-12T09:00:00+0530', 589000, 590000, 588000, 589500, 10],
+            ['2025-11-12T09:15:00+0530', 589500, 590500, 589000, 590000, 12],
+            ['2025-11-12T09:30:00+0530', 590000, 590200, 589800, 590100, 9]]
 
     def auto_login(self, **kwargs):
         self.login = kwargs
@@ -106,6 +115,15 @@ class FakeExchange:
         sign = 1 if order['side'] == 'BUY' else -1
         self.net[order['tradingSymbol']] = \
             self.net.get(order['tradingSymbol'], 0) + sign * qty
+
+    def candle_data(self, exchange, token, interval, from_timestamp,
+                    to_timestamp, oi=False):
+        self.candle_calls.append(dict(exchange=exchange.value, token=token,
+                                      interval=interval,
+                                      start=from_timestamp, end=to_timestamp))
+        if self.candle_error:
+            raise self.candle_error
+        return self.candles
 
     def get_order_book(self):
         return list(self.orders.values())
@@ -440,8 +458,61 @@ def test_a_symbol_asked_for_the_first_time_is_priced_at_once(arrow):
     assert session.symbol_tick('GOLD05DEC25FUT') is not None
 
 
-def test_arrow_history_is_none_until_its_candle_endpoint_is_confirmed(arrow):
-    """None, not [] — the Algo then collects from the live price."""
+def test_history_comes_from_arrows_candles_in_rupees_on_the_brokers_clock(
+        arrow):
+    session, exchange = arrow
+    bars = LocalLeg(session).rates('CRUDEOIL19NOV25FUT', 15, 100)
+    assert [b['close'] for b in bars] == [5895.0, 5900.0, 5901.0]  # paise / 100
+    # 09:00 IST is 03:30 UTC; returned as the BROKER's wall clock, as MT5's.
+    from datetime import datetime, timezone
+    utc = datetime(2025, 11, 12, 3, 30, tzinfo=timezone.utc).timestamp()
+    assert bars[0]['time'] == int(utc + IST_OFFSET_SEC)
+    assert bars[0]['spread'] == 0              # the close stands as the mid
+    call = exchange.candle_calls[-1]
+    assert call['interval'] == '15min' and call['token'] == '1'
+    assert 'T' in call['start'] and len(call['start']) == 19
+
+
+def test_only_the_newest_bars_asked_for_come_back(arrow):
     session, _ = arrow
-    assert session.rates('CRUDEOIL19NOV25FUT', 15, 100) is None
-    assert LocalLeg(session).rates('CRUDEOIL19NOV25FUT', 15, 100) is None
+    assert len(session.rates('CRUDEOIL19NOV25FUT', 15, 2)) == 2
+
+
+def test_history_on_another_scale_is_refused_not_used(arrow):
+    """A band built 100x wrong is a band the Algo would trade on."""
+    session, exchange = arrow
+    exchange.candles = [['2025-11-12T09:00:00+0530', 5895, 5900, 5890,
+                         5895, 10]]             # rupees, read as paise
+    assert session.rates('CRUDEOIL19NOV25FUT', 15, 10) is None
+
+
+def test_control_set_to_rupees_the_same_history_is_used(arrow):
+    session, exchange = arrow
+    exchange.candles = [['2025-11-12T09:00:00+0530', 5895, 5900, 5890,
+                         5895, 10]]
+    session.account.candle_price_divisor = 1
+    assert session.rates('CRUDEOIL19NOV25FUT', 15, 10)[0]['close'] == 5895.0
+
+
+def test_a_refused_range_or_an_unknown_interval_is_no_history(arrow):
+    session, exchange = arrow
+    assert session.rates('CRUDEOIL19NOV25FUT', 7, 10) is None   # no "7min"
+    exchange.candle_error = RuntimeError('HTTP 400: range too long')
+    assert session.rates('CRUDEOIL19NOV25FUT', 15, 10) is None
+    exchange.candle_error = None
+    exchange.candles = []
+    assert session.rates('CRUDEOIL19NOV25FUT', 15, 10) is None
+
+
+def test_mcxfo_is_used_for_trading_when_the_sdk_has_it(tmp_path, arrow_env):
+    """SDK 1.8: MCXFO for orders, quotes, margin; MCX is for downloads."""
+    session, exchange = make_sdk_session(tmp_path, with_mcxfo=True)
+    assert session.initialize()
+    LocalLeg(session).order('CRUDEOIL19NOV25FUT', 'BUY', 1.0)
+    assert exchange.sent[-1]['exchange'] == 'MCXFO'
+    session.rates('CRUDEOIL19NOV25FUT', 15, 5)
+    assert exchange.candle_calls[0]['exchange'] == 'MCXFO'
+
+
+def make_sdk_session(tmp_path, **sdk):
+    return make_session(tmp_path, sdk=make_sdk(**sdk))

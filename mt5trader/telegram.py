@@ -424,7 +424,7 @@ def _signal_rows(levels, block):
     block = block or {}
     filters = block.get('filters') or {}
     regime = filters.get('regime') or {}
-    rows = [('Z-score', plain((levels or {}).get('entry_z'), 4, True))]
+    rows = [('z', plain((levels or {}).get('entry_z'), 4, True))]
     if block.get('sigma') is not None:
         rows.append(('Spread SD', plain(block.get('sigma'), 6)))
     if block.get('mean') is not None:
@@ -1115,7 +1115,7 @@ class Bot:
                 ('Mode', {'OFF': '—', 'DRY': 'Signals',
                           'LIVE': 'Live'}[mode]),
                 ('Position', net_words(row)),
-                ('Z-score', plain(block.get('z_mid'), 4, True)),
+                ('z', plain(block.get('z_mid'), 4, True)),
                 ('Regime', (regime_now.get('state') or '—').lower()
                  .replace('_', ' ') if regime_now.get('state') else '—')]
         candles = filters_now.get('half_life_candles')
@@ -2063,7 +2063,7 @@ class AlertWatch:
                     ('Side', side_words(alert.get('side'))),
                     ('Do', alert.get('text')),
                     ('Spread', plain(alert.get('spread'), 4)),
-                    ('Z-score', plain(alert.get('z'), 2, True)), None,
+                    ('z', plain(alert.get('z'), 2, True)), None,
                     ('Sent', 'nothing - Signals mode, you trade')]))
 
     @staticmethod
@@ -2120,7 +2120,7 @@ class AlertWatch:
                 ('Unrealized', w3(row.get('open_pnl'))),
                 None,
                 ('Position', net_words(row)),
-                ('Z-score', plain(block.get('z_mid'), 4, True)),
+                ('z', plain(block.get('z_mid'), 4, True)),
                 ('Regime', (regime.get('state') or '—').lower()
                  .replace('_', ' ') if regime.get('state') else '—'),
                 # What this desk adds.

@@ -6584,7 +6584,7 @@
           var pair = pairs[key];
           var open = state.open.indexOf(panelId('chart', key)) >= 0;
           html += '<button data-panel="' + panelId('chart', key) + '">' +
-            'Chart — ' + (pair.name || key) + '<small>spread, z-score and ' +
+            'Chart — ' + (pair.name || key) + '<small>spread, z and ' +
             'both legs' + (open ? ' · open' : '') + '</small></button>';
         });
       }

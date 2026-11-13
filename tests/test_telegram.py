@@ -543,7 +543,7 @@ def test_a_signal_in_signals_mode_is_told_once(bot):
     [told] = watch(bot)
     assert 'SIGNAL  ·  ENTRY' in told
     assert 'H to L — SELL 1 @ 13.8050' in told
-    assert 'Z-score</b>  <code>+1.52' in told
+    assert 'z</b>  <code>+1.52' in told
     assert watch(bot) == []                    # once, by its id
     block['signal_alert'] = signal('S2', 'EXIT')
     [told] = watch(bot)
@@ -675,7 +675,7 @@ def test_a_position_that_opens_is_a_trade_entry(bot):
                     'Notional', 'Margin Req', 'Leg A Entry</b>  <code>$89.0800',
                     'Leg B Entry</b>  <code>$102.2760',
                     'Spread</b>  <code>+13.1960  (+1481.37 bps)',
-                    'Z-score</b>  <code>+1.4900', 'Est. Fees', 'Breakeven',
+                    'z</b>  <code>+1.4900', 'Est. Fees', 'Breakeven',
                     'Orders at', 'Filled at', 'Latency</b>  <code>180 ms'])
     assert 'Take Profit' in told and '$+3.85' in told    # 0.077 x 50
 
@@ -978,7 +978,7 @@ def test_status_opens_each_ladder_with_w3s_rows(bot):
     assert '<b>SYSTEM STATUS  ·  ' in text
     in_order(text, ['Algo</b>  <code>Enabled', 'Mode</b>  <code>Signals',
                     'Position</b>  <code>H to L 0.50',
-                    'Z-score</b>  <code>+1.2345',
+                    'z</b>  <code>+1.2345',
                     'Regime</b>  <code>mean reverting',
                     'Half-Life</b>  <code>296.5 periods  (4,447 min)'])
 
@@ -999,7 +999,7 @@ def test_end_of_day_is_w3s_report_per_ladder():
     assert text.startswith('<b>END OF DAY  ·  2027-01-15 08:00 UTC</b>')
     in_order(text, ['Trades', 'PnL</b>  <code>$+4.10', 'Equity',
                     'Unrealized', 'Position</b>  <code>flat',
-                    'Z-score</b>  <code>-0.5000',
+                    'z</b>  <code>-0.5000',
                     'Regime</b>  <code>trending'])
 
 

@@ -592,11 +592,11 @@ class AlgoDesk:
             history['candles'] = len(rows)
             if self.store is not None:
                 self._save(pair, run, rows, 'mt5')
-            logging.info('[ALGO %s] %d candle(s) from MT5, %d new',
+            logging.info('[ALGO %s] %d candle(s) from the brokers\' history, %d new',
                          pair.key, len(rows), added)
         if run.candles.stats()['ready']:
             history['state'] = 'done'
-            history['note'] = note or (f'{len(rows)} candles from MT5'
+            history['note'] = note or (f'{len(rows)} candles from the brokers\' history'
                                        if rows else 'saved candles')
         else:
             history['state'] = 'collecting'
@@ -625,10 +625,10 @@ class AlgoDesk:
             bars_a = leg_a.rates(pair.symbol_a, params['timeframe_min'], count)
             bars_b = leg_b.rates(pair.symbol_b, params['timeframe_min'], count)
         except Exception as e:
-            return [], f'MT5 history unavailable ({e}) — collecting live'
+            return [], f'history unavailable ({e}) — collecting live'
         if not bars_a or not bars_b:
             which = 'leg A' if not bars_a else 'leg B'
-            return [], (f'MT5 returned no history for {which} — '
+            return [], (f'the broker returned no history for {which} — '
                         f'collecting from the live price')
         offset_a = self.offset_for(pair.account_a)
         offset_b = self.offset_for(pair.account_b)
