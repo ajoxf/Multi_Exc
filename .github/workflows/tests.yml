@@ -1,0 +1,166 @@
+# The rule in CLAUDE.md, enforced by a machine instead of by memory:
+#
+#     `pytest tests/ -q` must pass before any commit, and LIVE mode
+#     must never be run without it.
+#
+# Two jobs, because they are not the same kind of evidence:
+#
+#   tests    — the GATE. Pure Python against fakes, no MT5, no browser,
+#              no network. Deterministic and fast (~10s). This is the
+#              one to require in branch protection.
+#   browser  — Chromium under Playwright, which is the only thing that
+#              can see a script error that silently unregisters a UI
+#              handler. Informative, NOT a gate yet — see its comment.
+#
+# MetaTrader5 is Windows-only and requirements.txt marks it
+# `sys_platform == "win32"`, so the whole suite installs and runs on
+# Linux. `mt5trader/broker.py` is the only module that imports it and
+# it falls back to `mt5 = None` off-Windows; the tests drive fakes.
+
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+# A superseded push should not keep burning a runner — the answer that
+# matters is the one for the current head.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: pytest tests/ -q
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # 3.11, because that is what the launcher and README tell the desk
+      # to run (`py -3.11 start.py`). CI proving a version nobody
+      # deploys is CI proving the wrong thing.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # The browser tests skip cleanly with no Chromium installed —
+      # `pytest.importorskip` on the module, and a skip on launch
+      # failure. Verified: 792 passed, 148 skipped on a runner with no
+      # browsers.
+      - name: Run the suite
+        run: pytest tests/ -q
+
+  windows:
+    name: pytest on Windows
+    runs-on: windows-latest
+    timeout-minutes: 15
+    # A SEPARATE JOB, not a matrix on `tests` above, and that is the
+    # whole reason this file has two nearly identical blocks.
+    #
+    # Adding `strategy.matrix.os` to `tests` renames its check runs to
+    # "pytest tests/ -q (ubuntu-latest)". The required status check on
+    # main is the exact string "pytest tests/ -q", so that name would
+    # stop existing and EVERY pull request would block on a check that
+    # can never report. The cost of the duplication is a dozen lines;
+    # the cost of the matrix is a repository nobody can merge into.
+    #
+    # WHY IT EXISTS. Every desk runs Windows, and the suite gates the
+    # engine there: START-TRADING refuses to start on a failure. Three
+    # separate incidents in this project were Linux/Windows differences
+    # that could not be seen from a Linux runner - a PowerShell probe
+    # mangled by cmd quoting, a path that is unwritable on Linux and a
+    # legal folder name on Windows, an installer switch. The last one
+    # stopped a trader working for a morning.
+    #
+    # It also installs MetaTrader5 for real: requirements.txt marks it
+    # `sys_platform == "win32"`, so this is the only job where that
+    # import is exercised at all. On Linux broker.py falls back to
+    # `mt5 = None` and the import path is never proven.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # No Chromium here: the browser tests skip cleanly without one,
+      # and the Linux job already covers them. This job is about the
+      # PLATFORM, not the UI.
+      - name: Run the suite
+        run: pytest tests/ -q
+
+  browser:
+    name: UI in Chromium (not a gate yet)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # DO NOT add this to required status checks yet, and do NOT wrap it
+    # in continue-on-error to make it green — a check that always passes
+    # is worth exactly nothing, and one that is always red is worse than
+    # nothing because it teaches the desk to ignore a red mark.
+    #
+    # Measured in a constrained container: a handful of ~143 fail per
+    # run, a DIFFERENT set each time, on code that is not being
+    # changed — timing flake. A full run does come back 143 green, so
+    # the flake is real and so is the suite.
+    #
+    # BUT: "it is all flake" was believed one round too long, and six
+    # STALE tests hid behind it for weeks — reproducible every single
+    # run, and in isolation. Four still asserted the TOUCH click
+    # mapping after TT became the shipped default, and one counted the
+    # rows of the leg book before the H->L / L->H hint row was added
+    # between them. Every one of those was the test being out of date,
+    # not the app; nobody looked, because the job was known to be red.
+    #
+    # So the rule for reading this job: a failure that repeats on the
+    # SAME test across runs is not flake, whatever the rest of the list
+    # is doing. Check it before shrugging at the colour.
+    #
+    # Watch this job: if it comes back green consistently on GitHub's
+    # better-resourced runners, make it required. If it stays flaky,
+    # fix the flaky tests before promoting it.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Chromium
+        run: playwright install --with-deps chromium
+
+      # BOTH files that need a browser, not just the UI one.
+      #
+      # tests/test_end_to_end.py drives click -> engine -> broker in a
+      # real Chromium, and it was running NOWHERE: this job named only
+      # test_ui_browser.py, and in the two jobs that do run the whole
+      # suite there is no Chromium, so its twelve tests hit
+      # `pytest.skip('chromium unavailable')` and reported green. Six
+      # of them were in fact broken. A test that is skipped everywhere
+      # is not coverage, and it is worse than no test because the count
+      # at the bottom of the run looks the same.
+      - name: Run the browser suite
+        run: pytest tests/test_ui_browser.py tests/test_end_to_end.py -q

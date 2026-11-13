@@ -1,0 +1,60 @@
+{
+  "_README": [
+    "THE ONE PLACE TO CHANGE THE REPOSITORY AND BRANCH.",
+    "The branch is main - the trunk. It was a claude/... branch while the rollout was being built.",
+    "",
+    "deploy/setup.ps1 reads this file, so switching the office from the",
+    "demo repo to the live one is an edit to the two lines below - not a",
+    "code change, and not a flag anybody has to remember to type.",
+    "",
+    "Edit it in the ROLLOUT KIT (the folder holding SETUP.bat, setup.ps1",
+    "and MT5-golden.zip). That copy is what new PCs are built from.",
+    "",
+    "A machine already installed does not re-read this: it has a git",
+    "remote of its own. To move an existing PC to a different repo, run",
+    "   git remote set-url origin <new url>",
+    "   git checkout <new branch>",
+    "in C:\\MT5-Trader, or just delete C:\\MT5-Trader and run SETUP.bat",
+    "again - the trader's config.json and .env are NOT in the repo, so",
+    "reinstalling does not lose the accounts.",
+    "",
+    "-Token on the SETUP.bat command line still wins over anything here;",
+    "the token is deliberately not storable in this file, because this",
+    "file travels on a USB stick."
+  ],
+  "repo_url": "https://github.com/nishant-patel-git/Mirror-MT5-Trader.git",
+  "branch": "main",
+  "root": "C:\\MT5-Trader",
+  "terminal_a": "C:\\MT5-A",
+  "terminal_b": "C:\\MT5-B",
+  "_shortcut_name": [
+    "What the Desktop icon is called. 'NEXUS Terminal' by default.",
+    "",
+    "It is here, and it is also a -ShortcutName flag, because ONE PC",
+    "running TWO shifts is set up twice - once per desk, each with its",
+    "own -Root and its own two terminal folders - and a fixed icon name",
+    "would mean the second run quietly repointed the first desk's icon",
+    "at the second desk's install. Two desks, two names.",
+    "",
+    "The icon points at START-TRADING.bat inside -Root. That file's",
+    "name does not change; this is the label on the Desktop."
+  ],
+  "shortcut_name": "NEXUS Terminal",
+  "_python": [
+    "The interpreters this project has actually been run on, green.",
+    "3.11 on Linux and Windows; 3.14 on a Windows office PC (625 passed).",
+    "A LIST because refusing a machine that already has a proven version",
+    "would mean installing a second Python on every desk for nothing.",
+    "Anything not listed here is refused loudly rather than used, so a",
+    "stray 3.9 cannot quietly become the one PC that behaves differently.",
+    "Add a version here only once the whole suite has passed on it.",
+    "",
+    "MetaTrader5's IPC handshake fails on a 32-bit Python with an error",
+    "that says nothing, so the bitness is checked and refused too - and",
+    "that check is not negotiable whatever this list says."
+  ],
+  "python_versions": [
+    "3.11",
+    "3.14"
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "_README": [
+    "THE MONTHLY ROLL LIST. Edit this file when the contract months",
+    "change, hand it to the traders, and they double-click ADD-PAIRS.BAT.",
+    "The new pairs appear on their Exchanges page.",
+    "",
+    "ONE file serves every PC. It does not name the two accounts, because",
+    "account names carry the MT5 login - AC-100015 - so they differ on",
+    "every desk. ADD-PAIRS reads which account is leg A and which is leg",
+    "B from the pairs the machine already trades. That is not a guess: it",
+    "is what that config does every day.",
+    "",
+    "Add \"leg_a_account\" and \"leg_b_account\" here only for a machine",
+    "with no pairs at all, or one whose existing pairs disagree about",
+    "which account is which - and ADD-PAIRS says so when that happens.",
+    "",
+    "It only ADDS. It never deletes a pair, never disables one, never",
+    "touches an account, and never edits a pair that is already there -",
+    "so running it on a machine holding a position cannot move that",
+    "position's ladder out from under it. A pair already present is",
+    "reported as already present and left exactly as it is.",
+    "",
+    "Symbols are the LIQUIDITY PROVIDER's spelling, and both parts",
+    "change: the suffix (XAUUSD.f, XAUUSD_, GOLD) and the contract code",
+    "(GCZ6, GC1226). Copy them from Market Watch rather than typing",
+    "from memory - a symbol the terminal does not have cannot trade, and",
+    "the pair sits there reading unknown.",
+    "",
+    "pair_type: SPOT_FUTURE (spot vs its own future), FUTURE_FUTURE (two",
+    "contract months), RELATED (two different instruments, NO fair",
+    "value). Getting it wrong is not cosmetic.",
+    "",
+    "TWO PAIRS, and the suffixes are not a typo. Leg A is spelled .c and",
+    "leg B .s because the two legs sit on DIFFERENT accounts with",
+    "different symbol suffixes - copy each one from the Market Watch of",
+    "the terminal that leg actually trades on, not from the other."
+  ],
+  "pairs": [
+    {
+      "name": "XAUUSD | GCZ6",
+      "leg_a": "XAUUSD.c",
+      "leg_b": "GCZ6.s",
+      "pair_type": "SPOT_FUTURE"
+    },
+    {
+      "name": "USOILX6 | UKOILX6",
+      "leg_a": "USOILX6.c",
+      "leg_b": "UKOILX6.s",
+      "pair_type": "RELATED"
+    }
+  ]
+}

@@ -1,0 +1,85 @@
+.env
+config.json
+config.json.bak
+config.json.tmp
+status.json
+status.json.tmp
+
+# The command queue and its replies - runtime, one per machine, and
+# recreated on every start (start.py --commands / --results). status.json
+# was already here; these two were missed, so a trader's `git status`
+# listed them as untracked every single day and invited someone to
+# commit one machine's in-flight orders.
+commands.jsonl
+results.json
+*.log
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Private build specification — never commit
+MT5_TRADER_LADDER_PROMPT.md
+*_PROMPT.md
+
+# The runtime journal — created on whichever box runs the engine
+*.db
+*.db-wal
+*.db-shm
+
+# The MetaTrader 5 template, built by deploy/make-golden-terminal.ps1.
+# Hundreds of megabytes, and a mis-stripped one carries an accounts
+# file - so it travels on a USB stick or a share, never in the repo.
+MT5-golden.zip
+deploy/MT5-golden.zip
+
+# Answers for an unattended configure.py run: this file HOLDS THE TWO
+# MT5 PASSWORDS in clear text. Delete it once the machine is set up.
+answers.json
+
+# The assembled USB folder, built by deploy/MAKE-KIT.bat. It contains
+# MT5-golden.zip and is rebuilt in one click, so it never belongs in
+# the repo.
+deploy/ROLLOUT-KIT/
+
+# ---------------------------------------------------------------
+# Brought across when `main` became the trunk. These were on main's
+# own scaffolding .gitignore and this branch never had them; the two
+# histories were unrelated, so nothing had ever merged the two lists.
+#
+# The first block is the one that matters: this repo's hard rule is
+# that credentials live in .env and nowhere else, and `.env` alone
+# only ignores that exact filename — a .env.backup or a .env.live
+# would have been committable.
+# ---------------------------------------------------------------
+.env.*
+!.env.example
+*.key
+*.pem
+credentials.json
+config.local.*
+*.py[cod]
+*.so
+.venv/
+venv/
+env/
+build/
+dist/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.ex4
+*.ex5
+MQL5/Logs/
+MQL5/Files/
+Tester/
+*.sqlite
+data/
+logs/
+backtest_results/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
