@@ -651,9 +651,11 @@ def check_pair(checklist, pair, report_a, report_b,
     k = sizing.spread_units(clip_b, contract_b)
     checklist.add(scope, 'One Qty', PASS,
                   f'{clip_a:g} lots of {pair.symbol_a} against '
-                  f'{clip_b:g} of {pair.symbol_b} — ${k:,.2f} per 1.00 '
+                  f'{clip_b:g} of {pair.symbol_b} — '
+                  f'{contracts.money_text(k, report_b.get("currency"))} per 1.00 '
                   f'of spread'
-                  + (f', and this pair cannot trade under ${floor:,.0f} '
+                  + (f', and this pair cannot trade under '
+                     f'{contracts.money_text(floor, report_b.get("currency"), 0)} '
                      f'a leg' if floor else ''))
     for lots, report, role, symbol in ((clip_a, report_a, 'A', pair.symbol_a),
                                        (clip_b, report_b, 'B', pair.symbol_b)):

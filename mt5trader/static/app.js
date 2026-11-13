@@ -129,12 +129,23 @@
       .replace(/"/g, '&quot;');
   }
 
-  function money(value) {
+  //: How each currency is written. Anything not listed is written as
+  //: its code, never as a dollar sign it is not.
+  var CURRENCY_SIGNS = {USD: '$', INR: '\u20b9', EUR: '\u20ac',
+                        GBP: '\u00a3', JPY: '\u00a5'};
+
+  function money(value, currency) {
     if (value === null || value === undefined || !isFinite(value)) return DASH;
     var sign = value < 0 ? '-' : '';
+    // IN ITS OWN CURRENCY. This printed '$' on everything, which on a
+    // pair whose leg B is MCX made a rupee P&L read as dollars — out by
+    // the exchange rate on the number a trader acts on. A pair's money
+    // is leg B's currency; an account's is the account's own.
+    var code = currency || state.moneyCurrency || 'USD';
+    var mark = CURRENCY_SIGNS[code] || (code + ' ');
     // Grouped: an account equity of 100000.00 is a number nobody reads
     // at a glance, and this column is read at a glance.
-    return sign + '$' + Math.abs(value).toLocaleString('en-US', {
+    return sign + mark + Math.abs(value).toLocaleString('en-US', {
       minimumFractionDigits: 2, maximumFractionDigits: 2});
   }
 
@@ -345,7 +356,9 @@
         : node.classList.contains('settings') ? panelId('settings')
           : node.classList.contains('fairwin')
             ? panelId('fair', node.dataset.pair)
-            : panelId('ladder', node.dataset.pair);
+            : node.classList.contains('chartwin')
+              ? panelId('chart', node.dataset.pair)
+              : panelId('ladder', node.dataset.pair);
   }
 
   // -- moving the windows ------------------------------------------------
@@ -796,10 +809,258 @@
     renderFair(node, row);
   }
 
+  // -- the live chart window -------------------------------------------
+
+  //: Per pair: {points, last t, fetching} — the series the window draws.
+  var charts = {};
+
+  function toggleChart(key) {
+    var id = panelId('chart', key);
+    if (state.open.indexOf(id) >= 0) { closePanel(id); } else { openPanel(id); }
+  }
+
+  function chartNode(key) {
+    var existing = document.querySelector(
+      '.chartwin[data-pair="' + cssEscape(key) + '"]');
+    if (existing) { return existing; }
+    var node = el('chart-template').content.firstElementChild.cloneNode(true);
+    node.dataset.pair = key;
+    node.querySelector('.close').addEventListener('click', function () {
+      closePanel(panelId('chart', key));
+    });
+    node.querySelector('.cw-range').addEventListener('change', function () {
+      drawChart(node, key);
+    });
+    el('desktop').appendChild(node);
+    return node;
+  }
+
+  function fetchChart(key) {
+    /* Only what is new since the last point held — the window asks once
+     * a second, and an hour of points every second would be waste. */
+    var held = charts[key] || (charts[key] = {points: [], last: null});
+    if (held.fetching) { return; }
+    held.fetching = true;
+    var url = '/api/history/' + encodeURIComponent(key) +
+      (held.last !== null ? '?since=' + held.last : '');
+    fetch(url).then(function (r) { return r.json(); }).then(function (body) {
+      held.fetching = false;
+      held.engine = body.engine;
+      var fresh = body.points || [];
+      if (held.last === null) { held.points = fresh; } else {
+        // z-scores are recomputed server-side over the whole window, so
+        // the newest points carry the right ones; older ones are kept.
+        held.points = held.points.concat(fresh);
+      }
+      if (held.points.length > 4000) {
+        held.points = held.points.slice(held.points.length - 3600);
+      }
+      if (fresh.length) { held.last = fresh[fresh.length - 1].t; }
+      var node = document.querySelector(
+        '.chartwin[data-pair="' + cssEscape(key) + '"]');
+      if (node) { drawChart(node, key); }
+    }).catch(function () { held.fetching = false; });
+  }
+
+  function renderChartWindow(key, row) {
+    var node = chartNode(key);
+    var title = node.querySelector('.cw-pair');
+    title.textContent = 'Chart — ' + (row.name || key);
+    title.title = key;
+    node._row = row;
+    var held = charts[key];
+    var now = Date.now();
+    if (!held || !held.asked || now - held.asked > 1000) {
+      (charts[key] = charts[key] || {points: [], last: null}).asked = now;
+      fetchChart(key);
+    }
+  }
+
+  function drawChart(node, key) {
+    var held = charts[key] || {points: []};
+    var row = node._row || {};
+    var range = parseFloat(node.querySelector('.cw-range').value) || 900;
+    var newest = held.points.length
+      ? held.points[held.points.length - 1].t : null;
+    var points = newest === null ? [] : held.points.filter(function (p) {
+      return p.t >= newest - range;
+    });
+    var canvas = node.querySelector('.cw-canvas');
+    var ratio = window.devicePixelRatio || 1;
+    var cssW = canvas.clientWidth || 560, cssH = canvas.clientHeight || 420;
+    if (canvas.width !== Math.round(cssW * ratio)) {
+      canvas.width = Math.round(cssW * ratio);
+      canvas.height = Math.round(cssH * ratio);
+    }
+    var ctx = canvas.getContext('2d');
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+    var last = points.length ? points[points.length - 1] : null;
+    var conv = (row.cross || {}).conversion;
+    node.querySelector('.cw-now').textContent = last && last.spread !== null
+      ? 'spread ' + fmt(last.spread, 2) + '  ·  bid/offer ' +
+        fmt(last.short, 2) + ' / ' + fmt(last.long, 2) +
+        (last.z !== null && last.z !== undefined
+          ? '  ·  z ' + fmt(last.z, 2) : '') +
+        (conv && conv.fx ? '  ·  ' + conv.fx + ' ' + fmt(last.fx, 4) : '')
+      : (held.engine === false ? 'the engine has not written a series yet'
+                               : 'no price');
+    node.querySelector('.cw-note').textContent =
+      'spread = B − ' + (row.hedge_ratio || 1) + ' × A' +
+      (conv ? '  (A = ' + (row.symbol_a || 'A') + ' × ' +
+        (conv.fx || '1') + ' × ' + (conv.price_factor || 1) + ')' : '') +
+      '.  Bands are the spread\'s own σ — a picture, not a signal.';
+    // The data it HAS, up to the range chosen: a minute of points drawn
+    // across a fifteen-minute axis is a squiggle against the edge.
+    var t0 = newest === null ? 0 : Math.max(newest - range,
+      points.length ? points[0].t : newest - range);
+    if (newest !== null && newest - t0 < 60) { t0 = newest - 60; }
+    var t1 = newest === null ? 1 : newest;
+    var pad = {l: 64, r: 10};
+    var panels = [
+      {top: 6, h: 170, title: 'Spread (mid) with the executable bid/offer'},
+      {top: 196, h: 90, title: 'z-score vs its last 5 min'},
+      {top: 306, h: 100, title: 'Leg A' + (conv ? ' (converted)' : '') +
+        ' and Leg B, same money'}];
+    function xOf(t) {
+      return pad.l + (cssW - pad.l - pad.r) * (t - t0) / ((t1 - t0) || 1);
+    }
+    function scale(panel, values, extra) {
+      var lo = Infinity, hi = -Infinity;
+      values.concat(extra || []).forEach(function (v) {
+        if (v === null || v === undefined || isNaN(v)) { return; }
+        lo = Math.min(lo, v); hi = Math.max(hi, v);
+      });
+      if (lo === Infinity) { return null; }
+      if (hi === lo) { hi += 1; lo -= 1; }
+      var m = (hi - lo) * 0.08;
+      lo -= m; hi += m;
+      return function (v) {
+        return panel.top + 14 + (panel.h - 14) * (hi - v) / (hi - lo);
+      };
+    }
+    function frame(panel, y, ticks) {
+      ctx.strokeStyle = '#c8c8c8';
+      ctx.strokeRect(pad.l, panel.top + 14, cssW - pad.l - pad.r, panel.h - 14);
+      ctx.fillStyle = '#333';
+      ctx.font = 'bold 10px sans-serif';
+      ctx.fillText(panel.title, pad.l, panel.top + 10);
+      if (!y) {
+        ctx.fillStyle = '#999'; ctx.font = '11px sans-serif';
+        ctx.fillText('—', pad.l + 8, panel.top + 34);
+        return;
+      }
+      ctx.font = '9px sans-serif'; ctx.fillStyle = '#555';
+      ticks.forEach(function (v) {
+        var py = y(v);
+        ctx.fillText(fmt(v, Math.abs(v) >= 1000 ? 0 : 2), 2, py + 3);
+        ctx.strokeStyle = '#eee';
+        ctx.beginPath(); ctx.moveTo(pad.l, py);
+        ctx.lineTo(cssW - pad.r, py); ctx.stroke();
+      });
+    }
+    function line(field, y, colour, width, dash) {
+      // A GAP where there was no price — never a line bridging it.
+      ctx.strokeStyle = colour; ctx.lineWidth = width || 1.2;
+      ctx.setLineDash(dash || []);
+      ctx.beginPath();
+      var open = false;
+      points.forEach(function (p) {
+        var v = typeof field === 'function' ? field(p) : p[field];
+        if (v === null || v === undefined || isNaN(v)) { open = false; return; }
+        var px = xOf(p.t), py = y(v);
+        if (open) { ctx.lineTo(px, py); } else { ctx.moveTo(px, py); }
+        open = true;
+      });
+      ctx.stroke(); ctx.setLineDash([]); ctx.lineWidth = 1;
+    }
+    function niceTicks(values) {
+      var lo = Infinity, hi = -Infinity;
+      values.forEach(function (v) {
+        if (v === null || v === undefined || isNaN(v)) { return; }
+        lo = Math.min(lo, v); hi = Math.max(hi, v);
+      });
+      if (lo === Infinity) { return []; }
+      return [lo, (lo + hi) / 2, hi];
+    }
+    function pick(field) { return points.map(function (p) { return p[field]; }); }
+
+    // 1. the spread
+    var sp = panels[0];
+    var spreadVals = pick('spread').concat(pick('short'), pick('long'));
+    var bandVals = points.map(function (p) {
+      return p.mean === null || p.mean === undefined ? null : p.mean + 2 * p.sd;
+    }).concat(points.map(function (p) {
+      return p.mean === null || p.mean === undefined ? null : p.mean - 2 * p.sd;
+    }));
+    var y1 = scale(sp, spreadVals, bandVals);
+    frame(sp, y1, niceTicks(spreadVals));
+    if (y1) {
+      line(function (p) { return p.mean === null || p.mean === undefined
+        ? null : p.mean + 2 * p.sd; }, y1, '#d9b3ff', 1, [3, 3]);
+      line(function (p) { return p.mean === null || p.mean === undefined
+        ? null : p.mean - 2 * p.sd; }, y1, '#d9b3ff', 1, [3, 3]);
+      line('mean', y1, '#b48ad6', 1, [6, 3]);
+      line('long', y1, '#e8a0a0', 1);
+      line('short', y1, '#9fb8e8', 1);
+      line('spread', y1, '#111', 1.6);
+    }
+    // 2. the z-score
+    var zp = panels[1];
+    var y2 = scale(zp, pick('z'), [-2.5, 2.5]);
+    frame(zp, y2, [-2, 0, 2]);
+    if (y2) {
+      [[2, '#e8a0a0'], [-2, '#9fb8e8'], [0, '#bbb']].forEach(function (g) {
+        ctx.strokeStyle = g[1]; ctx.setLineDash([4, 3]);
+        ctx.beginPath(); ctx.moveTo(pad.l, y2(g[0]));
+        ctx.lineTo(cssW - pad.r, y2(g[0])); ctx.stroke();
+        ctx.setLineDash([]);
+      });
+      line('z', y2, '#6a3d9a', 1.4);
+    }
+    // 3. the two legs, in the same money
+    var lp = panels[2];
+    var legVals = pick('a').concat(pick('b'));
+    var y3 = scale(lp, legVals);
+    frame(lp, y3, niceTicks(legVals));
+    if (y3) {
+      line('a', y3, '#1f6fd1', 1.3);
+      line('b', y3, '#c0392b', 1.3);
+      ctx.font = '9px sans-serif';
+      ctx.fillStyle = '#1f6fd1';
+      ctx.fillText('A ' + (row.symbol_a || ''), cssW - 200, lp.top + 10);
+      ctx.fillStyle = '#c0392b';
+      ctx.fillText('B ' + (row.symbol_b || ''), cssW - 100, lp.top + 10);
+    }
+    // time axis
+    ctx.fillStyle = '#555'; ctx.font = '9px sans-serif';
+    if (newest !== null) {
+      [t0, (t0 + t1) / 2, t1].forEach(function (t, i) {
+        var label = new Date(t * 1000).toTimeString().slice(0, 8);
+        var px = xOf(t) - (i === 2 ? 40 : i === 1 ? 20 : 0);
+        ctx.fillText(label, px, cssH - 2);
+      });
+    }
+    // legend for panel 1
+    ctx.font = '9px sans-serif';
+    [['mid', '#111'], ['offer (buy)', '#e8a0a0'], ['bid (sell)', '#9fb8e8'],
+     ['mean ±2σ', '#b48ad6']].forEach(function (item, i) {
+      ctx.fillStyle = item[1];
+      ctx.fillText(item[0], cssW - 260 + i * 62, sp.top + 10);
+    });
+  }
+
   function wireLadder(node, key) {
     node.querySelector('.close').addEventListener('click', function () {
       closePanel(panelId('ladder', key));
     });
+    var chartButton = node.querySelector('.ladder-chart');
+    if (chartButton) {
+      chartButton.addEventListener('click', function (e) {
+        e.stopPropagation();
+        toggleChart(key);
+      });
+    }
     node.querySelector('.order-type').addEventListener('change', function (e) {
       setPair(key, {order_type: e.target.value});
     });
@@ -1350,10 +1611,10 @@
       (live.symbol_a || 'A') + inUnits(lotsA, live.contract_a) +
       ' / ' + fmt(lotsB, 2) + ' lots ' +
       (live.symbol_b || 'B') + inUnits(lotsB, live.contract_b) +
-      (perQty ? ' — ' + money(perQty) + ' per 1.00 of spread' : '') +
+      (perQty ? ' — ' + money(perQty, live.currency) + ' per 1.00 of spread' : '') +
       '. Qty ' + fmt(qty, 2) + ' sends ' + fmt(lotsA * qty, 2) + ' / ' +
       fmt(lotsB * qty, 2) + ' lots' +
-      (perQty ? ', ' + money(perQty * qty) + ' per 1.00' : '') +
+      (perQty ? ', ' + money(perQty * qty, live.currency) + ' per 1.00' : '') +
       // WHERE THE CONTRACT SIZE CAME FROM. Normally MT5's, and said so.
       // An override is stated as an override, with MT5's own number
       // beside it: every money figure on this ladder runs through it.
@@ -1870,7 +2131,7 @@
       : 'flat';
     var pnl = node.querySelector('.pnl');
     pnl.textContent = row.open_pnl === null || row.open_pnl === undefined
-      ? DASH : money(row.open_pnl);
+      ? DASH : money(row.open_pnl, row.currency);
     pnl.classList.toggle('up', row.open_pnl > 0);
     pnl.classList.toggle('down', row.open_pnl < 0);
     // HIDDEN ON REQUEST, not removed. The numbers are correct — Qty is
@@ -2103,26 +2364,26 @@
       exit.spread_width_money === undefined
       ? 'one round turn of both legs\u2019 bid-ask, measured live'
       : 'one round turn of both legs\u2019 bid-ask = ' +
-        money(exit.spread_width_money) + ' at this size. Already inside ' +
+        money(exit.spread_width_money, row.currency) + ' at this size. Already inside ' +
         'the two prices, so it is not added again.';
     node.querySelector('.x-comm').textContent =
       exit.commission === null || exit.commission === undefined
-        ? DASH : money(exit.commission);
+        ? DASH : money(exit.commission, row.currency);
     // Two terms that are ZERO by default and shown only when they are
     // in play: an allowance nobody set and a swap over no nights are
     // rows that say nothing, and the rail is 100px wide.
-    showTerm(node, '.x-slip', exit.slippage_allowance,
+    showTerm(node, '.x-slip', exit.slippage_allowance, row.currency,
       'a BUDGET for slippage, not a measurement — the realised figure ' +
       'is in the slippage report');
-    showTerm(node, '.x-swap', exit.swap_money,
+    showTerm(node, '.x-swap', exit.swap_money, row.currency,
       exit.nights ? exit.nights + ' night(s) of swap, both legs, signed: ' +
         'a credit reduces what has to be recovered'
         : 'set BREAK_EVEN_NIGHTS to price a holding period');
     var target = node.querySelector('.x-target');
     target.textContent = exit.target_money === null ||
-      exit.target_money === undefined ? DASH : money(exit.target_money);
+      exit.target_money === undefined ? DASH : money(exit.target_money, row.currency);
     target.title = exit.target_pct
-      ? exit.target_pct + '% of ' + money(exit.margin_per_spread) +
+      ? exit.target_pct + '% of ' + money(exit.margin_per_spread, row.currency) +
         ' margin per spread' +
         (exit.margin_source ? ' (from the ' + exit.margin_source + ')' : '')
       : 'set TP_TARGET_PCT_OF_MARGIN in Settings';
@@ -2162,7 +2423,7 @@
     node.querySelector('.tp-sell').textContent = fmt(exit.tp_sell, digits);
     var short = '';
     if (exit.target_pct && exit.margin_per_spread) {
-      short = exit.target_pct + '% of ' + money(exit.margin_per_spread);
+      short = exit.target_pct + '% of ' + money(exit.margin_per_spread, row.currency);
     } else if (exit.break_even_buy !== null &&
                exit.break_even_buy !== undefined) {
       short = 'B/E only';
@@ -2179,7 +2440,7 @@
       : '') + (exit.note || '');
   }
 
-  function showTerm(node, selector, value, why) {
+  function showTerm(node, selector, value, currency, why) {
     /* A break-even term that is zero by default: shown only when it is
      * actually in play, and hidden — not zeroed — when it is not. */
     var cell = node.querySelector(selector);
@@ -2187,7 +2448,7 @@
     var tr = cell.parentNode;
     var missing = value === null || value === undefined;
     tr.hidden = missing || value === 0;
-    cell.textContent = missing ? DASH : money(value);
+    cell.textContent = missing ? DASH : money(value, currency);
     cell.title = why;
     if (missing) { tr.hidden = false; }   // unmeasured is not zero: say so
   }
@@ -2308,11 +2569,14 @@
     if (!strip) {
       strip = document.createElement('div');
       strip.className = 'cross-strip';
-      var counts = node.querySelector('.counts');
-      if (counts && counts.parentNode) {
-        counts.parentNode.insertBefore(strip, counts);
+      // Directly under the quote strip, outside the scrolling price
+      // column: inside it, the strip sat below the last row and was
+      // only seen on a ladder short enough to show its bottom.
+      var quotes = node.querySelector('.quotestrip');
+      if (quotes && quotes.parentNode) {
+        quotes.parentNode.insertBefore(strip, quotes.nextSibling);
       } else {
-        node.appendChild(strip);
+        node.insertBefore(strip, node.children[1] || null);
       }
     }
     var parts = [];
@@ -2757,12 +3021,12 @@
         fmt(row.increment_derived, 6) + '"></td>';
       html += '<td><input class="qty" type="number" step="0.01" value="' +
         row.default_quantity + '"></td>';
-      html += '<td>' + money(row.spread_units) + '</td>';
+      html += '<td>' + money(row.spread_units, row.currency) + '</td>';
       html += '<td>' + (row.net_position || 0) + '</td>';
       html += '<td>' + row.working_buys + '/' + row.working_sells + '</td>';
       html += '<td>' + fmt(row.avg_entry, 4) + '</td>';
       html += '<td>' + (row.open_pnl === null || row.open_pnl === undefined
-                        ? DASH : money(row.open_pnl)) + '</td>';
+                        ? DASH : money(row.open_pnl, row.currency)) + '</td>';
       html += '<td>' + select('mode', ['LIMIT', 'MARKET'], row.order_type) + '</td>';
       html += '<td>' + select('tif', ['DAY', 'GTC'], row.time_in_force) + '</td>';
       html += '<td>' + select('on', ['ALLOW', 'EXIT_IF_PROFIT', 'EXIT_ALWAYS'],
@@ -2961,7 +3225,7 @@
       html += '<td>' + fmt(position.entry_spread, 4) + '</td>';
       html += '<td>' + fmt(position.closing_spread, 4) + '</td>';
       html += '<td class="' + (position.net_pnl > 0 ? 'up' : 'down') + '">' +
-        money(position.net_pnl) + '</td>';
+        money(position.net_pnl, row.currency) + '</td>';
       html += '<td>' + position.order_type + '</td>';
       html += '<td>' + fmt(position.entry_slippage, 4) + '</td>';
       html += '<td>' + (position.click_to_on_ms === null ||
@@ -3511,14 +3775,14 @@
         '</td>';
       // Equity first, then balance and credit beside it: a demo funded
       // with credit shows a balance of 0.00 against real equity.
-      html += '<td>' + money(row.equity) + '</td>';
-      html += '<td>' + money(row.balance) + '</td>';
-      html += '<td>' + money(row.credit) + '</td>';
+      html += '<td>' + money(row.equity, row.currency) + '</td>';
+      html += '<td>' + money(row.balance, row.currency) + '</td>';
+      html += '<td>' + money(row.credit, row.currency) + '</td>';
       html += '<td class="' + (row.profit > 0 ? 'up' : row.profit < 0
-                               ? 'down' : '') + '">' + money(row.profit) +
+                               ? 'down' : '') + '">' + money(row.profit, row.currency) +
         '</td>';
-      html += '<td>' + money(row.margin) + '</td>';
-      html += '<td>' + money(row.margin_free) + '</td>';
+      html += '<td>' + money(row.margin, row.currency) + '</td>';
+      html += '<td>' + money(row.margin_free, row.currency) + '</td>';
       html += '<td>' + (row.margin_level === null ||
                         row.margin_level === undefined
                         ? DASH : fmt(row.margin_level, 1) + '%') + '</td>';
@@ -3946,6 +4210,13 @@
         wanted[fairId] = true;
         renderFairWindow(key, snapshot.pairs[key]);
       }
+      // The live chart: opened and closed by the trader, never by the
+      // snapshot.
+      var chartId = panelId('chart', key);
+      if (state.open.indexOf(chartId) >= 0) {
+        wanted[chartId] = true;
+        renderChartWindow(key, snapshot.pairs[key]);
+      }
     });
     if (wanted[panelId('grid')]) { renderGrid(); }
     if (wanted[panelId('monitor')]) { renderMonitor(); }
@@ -4103,6 +4374,10 @@
       var label = parts[0] === 'ladder'
         ? ((state.snapshot.pairs[parts.slice(1).join(':')] || {}).name ||
            parts.slice(1).join(':'))
+        : parts[0] === 'chart'
+          ? 'Chart: ' + ((state.snapshot.pairs[parts.slice(1).join(':')] || {})
+                           .name || parts.slice(1).join(':'))
+        : parts[0] === 'fair' ? 'Fair: ' + parts.slice(1).join(':')
         : parts[0] === 'grid' ? 'Market Grid'
           : parts[0] === 'settings' ? 'Exchanges' : 'Positions';
       var badge = '';
@@ -4209,6 +4484,7 @@
     fetch('/api/status').then(function (r) { return r.json(); })
       .then(function (snapshot) {
         state.snapshot = snapshot;
+        state.moneyCurrency = snapshot.money_currency || 'USD';
         // The server is the authority on this. The overlay follows what
         // it says and never decides for itself - a browser that thought
         // it was unlocked would only be lying to the person in front of
@@ -4302,6 +4578,16 @@
         html += '<div class="menu-note">No pair is configured yet — add ' +
           'one on the Exchanges page. Each pair is its own ladder, and ' +
           'they trade side by side on this desktop.</div>';
+      }
+      if (keys.length) {
+        html += '<div class="menu-title">Live charts</div>';
+        keys.forEach(function (key) {
+          var pair = pairs[key];
+          var open = state.open.indexOf(panelId('chart', key)) >= 0;
+          html += '<button data-panel="' + panelId('chart', key) + '">' +
+            'Chart — ' + (pair.name || key) + '<small>spread, z-score and ' +
+            'both legs' + (open ? ' · open' : '') + '</small></button>';
+        });
       }
       html += '<div class="menu-title">Windows</div>' +
         '<button data-panel="' + panelId('grid') + '">Market Grid' +

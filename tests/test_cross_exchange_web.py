@@ -110,3 +110,40 @@ def test_one_symbol_converted_two_ways_is_refused_at_save(client):
                   'price_factor': 32.15}})
     assert reply.status_code == 400
     assert 'GCZ5' in reply.get_json()['error']
+
+
+def test_picking_both_units_computes_the_factor_and_ignores_a_typed_one(
+        client, paths):
+    post(client, '/api/pairs/GCZ5|GOLD', {
+        'leg_a': {'account': 'cme', 'symbol': 'GCZ5', 'fx': 'USDINR',
+                  'price_unit': 'oz', 'price_factor': 99},
+        'leg_b': {'account': 'mcx', 'symbol': 'GOLD05DEC25FUT',
+                  'price_unit': '10g'}})
+    leg = cfg.load_raw(paths['config'])['pairs']['GCZ5|GOLD']['leg_a']
+    assert leg['price_factor'] == pytest.approx(0.3215074657)
+
+
+def test_control_custom_keeps_the_factor_that_was_typed(client, paths):
+    post(client, '/api/pairs/GCZ5|GOLD', {
+        'leg_a': {'account': 'cme', 'symbol': 'GCZ5', 'fx': 'USDINR',
+                  'price_unit': 'custom', 'price_factor': 0.5},
+        'leg_b': {'account': 'mcx', 'symbol': 'GOLD05DEC25FUT',
+                  'price_unit': '10g'}})
+    leg = cfg.load_raw(paths['config'])['pairs']['GCZ5|GOLD']['leg_a']
+    assert leg['price_factor'] == 0.5
+
+
+def test_units_that_do_not_convert_are_refused_in_words(client):
+    reply = post(client, '/api/pairs/GCZ5|GOLD', {
+        'leg_a': {'account': 'cme', 'symbol': 'GCZ5', 'price_unit': 'oz'},
+        'leg_b': {'account': 'mcx', 'symbol': 'CRUDE', 'price_unit': 'bbl'}})
+    assert reply.status_code == 400
+    assert 'do not convert' in reply.get_json()['error']
+
+
+def test_the_working_is_served_step_by_step(client):
+    body = client.get('/api/units/factor?from=oz&to=kg').get_json()
+    assert body['factor'] == pytest.approx(32.150746568)
+    assert body['steps'][0] == 'Leg A is priced per oz = 31.1034768 g'
+    keys = [u['key'] for u in client.get('/api/units').get_json()['units']]
+    assert {'oz', '10g', 'kg', 'bbl', 'lb'} <= set(keys)

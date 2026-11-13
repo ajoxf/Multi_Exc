@@ -953,6 +953,39 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
 
     # -- pairs --------------------------------------------------------------
 
+    @app.get('/api/history/<path:key>')
+    def api_history(key):
+        """One pair's recent spread, leg prices, rate and z-score for its
+        chart window. `since` returns only newer points. A picture of the
+        market — nothing reads it to decide anything."""
+        from .coordinator import history_path_for
+        from .history import with_zscore
+        data = atomicfile.read_json(history_path_for(status_path),
+                                    default=None) or {}
+        rows = with_zscore((data.get('pairs') or {}).get(key) or [])
+        since = request.args.get('since', type=float)
+        if since is not None:
+            rows = [r for r in rows if r['t'] > since]
+        return jsonify({'ok': True, 'pair': key, 'at': data.get('at'),
+                        'sample_sec': data.get('sample_sec'),
+                        'points': rows,
+                        'engine': bool(data)})
+
+    @app.get('/api/units')
+    def api_units():
+        """The units a leg can be priced per, and their sizes — the
+        Exchanges page builds the unit-factor dropdowns and shows the
+        working from these."""
+        return jsonify({'ok': True, 'units': contracts.units_table()})
+
+    @app.get('/api/units/factor')
+    def api_unit_factor():
+        steps = contracts.factor_steps(request.args.get('from'),
+                                       request.args.get('to'))
+        if steps is None:
+            return jsonify({'ok': False, 'error': 'unknown unit'}), 400
+        return jsonify(dict(steps, ok=steps['factor'] is not None))
+
     @app.get('/api/fx')
     def api_fx():
         """Every configured exchange rate, its source, its age, and
@@ -1117,6 +1150,9 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                 (pair.get('leg_a') or {}).get('symbol'),
                 (pair.get('leg_b') or {}).get('symbol')),
             'conversion': specs['a'].get('conversion'),
+            'unit_steps': contracts.factor_steps(
+                (pair.get('leg_a') or {}).get('price_unit'),
+                (pair.get('leg_b') or {}).get('price_unit')),
             'lot_match': contracts.lot_match(
                 contracts.spec_for((pair.get('leg_a') or {}).get('symbol')),
                 contracts.spec_for((pair.get('leg_b') or {}).get('symbol'),
@@ -1192,14 +1228,32 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                     # factor it never showed.
                     merged = dict(pair.get(field) or {})
                     merged.update(payload[field])
-                    for k in ('fx', 'price_factor'):
+                    for k in ('fx', 'price_factor', 'price_unit'):
                         if merged.get(k) in ('', None):
                             merged.pop(k, None)
                     pair[field] = merged
                 else:
                     pair[field] = payload[field]
+        # UNITS PICKED, NOT A NUMBER TYPED: when both legs name the unit
+        # they are priced per, the factor is COMPUTED from them here, so
+        # the stored number always agrees with the two units beside it.
+        # 'custom' (or no unit) keeps the factor the operator typed.
+        unit_a = (pair.get('leg_a') or {}).get('price_unit')
+        unit_b = (pair.get('leg_b') or {}).get('price_unit')
+        if unit_a and unit_b and 'custom' not in (unit_a, unit_b):
+            steps = contracts.factor_steps(unit_a, unit_b)
+            if steps is None or steps['factor'] is None:
+                return jsonify({'ok': False, 'error': (
+                    f'leg A is priced per {unit_a!r} and leg B per '
+                    f'{unit_b!r}: '
+                    + ((steps or {}).get('steps') or
+                       ['one of those is not a unit this knows'])[0])}), 400
+            pair['leg_a']['price_factor'] = round(steps['factor'], 12)
         for side in ('leg_a', 'leg_b'):
             leg = pair.get(side) or {}
+            for k in ('price_unit',):
+                if leg.get(k) in ('', None):
+                    leg.pop(k, None)
             if leg.get('fx') is not None:
                 leg['fx'] = str(leg['fx']).upper().replace('/', '')
                 if parse_pair(leg['fx']) is None:

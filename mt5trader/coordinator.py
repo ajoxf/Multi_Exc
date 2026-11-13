@@ -33,6 +33,7 @@ from .quoter import Quoter, quoting_leg
 from .reconcile import Reconciler
 from .session import SessionClock, day_orders, overnight_action
 from . import contracts
+from .history import SpreadHistory
 from .spread import (LevelSigma, QuoteAgeTracker, SpreadJumpTracker,
                      compute_spread, stale_quote)
 
@@ -97,6 +98,10 @@ class Coordinator:
         self.quote_ages = QuoteAgeTracker(monotonic)
         self.jumps = SpreadJumpTracker(monotonic)
         self.sigmas = {}                    # pair key -> LevelSigma
+        #: The last hour of every spread, for the chart windows. A
+        #: picture only: nothing here reads it to decide anything.
+        self.history = SpreadHistory()
+        self._history_written = 0.0
         self.market = {}                    # pair key -> snapshot
         self.session = {}                   # pair key -> O/H/L/V of OUR series
         self._account_cache = {}            # account -> (at, info)
@@ -521,6 +526,7 @@ class Coordinator:
                 # less: it says so, it tries to fix itself, and it
                 # watches what is already at the broker.
                 self.market[key] = None
+                self.history.observe(key, None)       # a gap, not a zero
                 self._go_dark(key, pair, tick_a, tick_b)
                 continue
             self._dark.pop(key, None)
@@ -569,6 +575,7 @@ class Coordinator:
                                 else _badge(md, stale, jumped))
             self._observe_session(key, md, pair)
             self.market[key] = md
+            self.history.observe(key, md)
             # LIMIT-mode orders are worked on the SAME pass that priced
             # them: a peg re-priced off a snapshot older than the one on
             # screen is a peg holding a level nobody is showing.
@@ -645,6 +652,15 @@ class Coordinator:
                            if alive else
                            'neither leg answered — check the terminals'),
                 'ticks': got}
+
+    def pair_currency(self, pair):
+        """Leg B's currency: the conversion's target if leg A is
+        converted (leg B is then in that currency), else what leg B's
+        broker reports. None when nobody has said."""
+        fx = (pair.leg_a or {}).get('fx')
+        if fx and len(str(fx)) == 6:
+            return str(fx).upper()[3:]
+        return (pair.meta_b or {}).get('currency') or None
 
     def cross_exchange(self, pair, md):
         """What makes a cross-exchange pair checkable by eye.
@@ -2115,6 +2131,10 @@ class Coordinator:
                 # The cross-exchange facts: the rate, how leg A is
                 # restated, how the two lots compare, and both expiries.
                 'cross': self.cross_exchange(pair, md),
+                # The currency every money figure on THIS ladder is in:
+                # leg B's, which is where k = L_B x C_B puts it — rupees
+                # for an MCX leg, whatever leg A trades in.
+                'currency': self.pair_currency(pair),
                 'account_a': pair.account_a, 'account_b': pair.account_b,
                 'symbol_a': pair.symbol_a, 'symbol_b': pair.symbol_b,
                 # What KIND of pair this is — the operator's own
@@ -2304,6 +2324,10 @@ class Coordinator:
             'hedge_times_ms': list(self.quoter.hedge_times[-50:]),
             'click_to_on_ms': list(self.executor.timings[-50:]),
             'pairs': pairs,
+            # One currency when every ladder shares it, so a panel that
+            # totals across pairs can label its sum; None when they mix.
+            'money_currency': _common({p.get('currency')
+                                       for p in pairs.values()}),
             'magic': MAGIC_NUMBER,
         }
 
@@ -2326,6 +2350,21 @@ class Coordinator:
         with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(payload, f, default=str)
         atomicfile.replace(tmp, self.status_path)
+        self.publish_history()
+
+    def publish_history(self, every_sec=2.0):
+        """The chart series, beside the status file, every couple of
+        seconds — kept OUT of the status snapshot, which the screen reads
+        three times a second and which an hour of points would bloat."""
+        now = self.clock()
+        if now - self._history_written < every_sec:
+            return
+        self._history_written = now
+        try:
+            atomicfile.write_json(history_path_for(self.status_path),
+                                  self.history.payload())
+        except OSError as e:
+            logging.debug("chart history not written: %s", e)
 
     def serve_commands(self):
         """Drain clicks on their OWN thread, far faster than the poll.
@@ -2539,6 +2578,17 @@ def _offered(leg, symbol):
     return leg.find_symbols('') or []
 
 
+def _common(values):
+    values = {v for v in values if v}
+    return next(iter(values)) if len(values) == 1 else None
+
+
+def history_path_for(status_path):
+    """Where the chart series lives: beside the status file."""
+    folder = os.path.dirname(os.path.abspath(status_path))
+    return os.path.join(folder, 'history.json')
+
+
 def _meta_from_report(report):
     """The subset of MT5's symbol facts the sizing and ladder math read."""
     bid, ask = report.get('bid'), report.get('ask')
@@ -2546,6 +2596,7 @@ def _meta_from_report(report):
         'symbol': report.get('symbol'),
         'description': report.get('description'),
         'contract_size': report.get('contract_size'),
+        'currency': report.get('currency'),
         'tick_size': report.get('tick_size'),
         'tick_value': report.get('tick_value'),
         'digits': report.get('digits'),

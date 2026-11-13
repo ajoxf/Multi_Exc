@@ -5066,3 +5066,28 @@ def test_an_unreadable_account_leaves_the_row_UNMEASURED(page):
         assert '$0.00' not in text.split('nothing to reconcile')[0][-120:]
     finally:
         page.evaluate(RELEASE_THE_SNAPSHOT)
+
+
+def test_the_live_chart_window_opens_from_the_ladder_and_closes(page):
+    """One chart window per ladder, opened and closed by the trader —
+    the arrow-statarb graphs, in this terminal's windows."""
+    assert page.locator('.window.chartwin').count() == 0
+    page.click('.ladder .ladder-chart')
+    page.wait_for_selector('.window.chartwin', timeout=WAIT)
+    assert 'Gold basis' in page.text_content('.chartwin .cw-pair')
+    # The same button closes it again...
+    page.click('.ladder .ladder-chart')
+    page.wait_for_selector('.window.chartwin', state='detached', timeout=WAIT)
+    # ...and so does its own X.
+    page.click('.ladder .ladder-chart')
+    page.wait_for_selector('.window.chartwin', timeout=WAIT)
+    page.click('.chartwin .close')
+    page.wait_for_selector('.window.chartwin', state='detached', timeout=WAIT)
+
+
+def test_money_is_written_in_the_pairs_own_currency(page):
+    """A rupee P&L printed with a dollar sign is out by the exchange
+    rate on the number a trader acts on."""
+    assert page.evaluate("MT5Trader.money(1234.5, 'INR')") == '₹1,234.50'
+    assert page.evaluate("MT5Trader.money(-5, 'USD')") == '-$5.00'
+    assert page.evaluate("MT5Trader.money(7, 'AED')") == 'AED 7.00'

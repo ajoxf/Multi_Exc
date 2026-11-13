@@ -382,7 +382,8 @@ class Reconciler:
             "reconcile: closed ORPHAN %s ticket %s on '%s' — %s %s lots, "
             "P&L %s", position['symbol'], ticket, account, position['side'],
             position['volume'],
-            f"${pnl:,.2f}" if pnl is not None else 'unmeasured')
+            f"{pnl:,.2f} in the leg's price currency" if pnl is not None
+            else 'unmeasured')
         return entry
 
     def _contract_size(self, account, symbol):

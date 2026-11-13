@@ -70,8 +70,12 @@
   function refresh() {
     return Promise.all([
       api('/api/accounts'), api('/api/pairs'), api('/api/settings'),
-      api('/api/lock'), api('/api/fx')
+      api('/api/lock'), api('/api/fx'), api('/api/units')
     ]).then(function (results) {
+      // The units a leg can be priced per, with their sizes: the unit
+      // factor is worked out from these, on the screen, step by step.
+      local.units = (results[5] && results[5].body &&
+                     results[5].body.units) || [];
       // The exchange rates cross-currency pairs convert through.
       local.fx = (results[4] && results[4].body && results[4].body.rates) || {};
       local.accounts = results[0].body.accounts || [];
@@ -762,7 +766,10 @@
     }
     return escape(leg.symbol) + (leg.fx || leg.price_factor
       ? ' <small>x ' + escape(leg.fx || '1') + ' x ' +
-        escape(leg.price_factor || 1) + '</small>' : '') +
+        escape(leg.price_factor || 1) +
+        (leg.price_unit ? ' (' + escape(leg.price_unit) + ')' : '') +
+        '</small>' : leg.price_unit
+        ? ' <small>per ' + escape(leg.price_unit) + '</small>' : '') +
       '<div class="hint">on ' + detail + '</div>';
   }
 
@@ -799,23 +806,16 @@
                   '<div class="hint">Leg A is restated in leg B\'s money ' +
                   'before the two are subtracted: A x rate x unit factor. ' +
                   'Set the rate under Exchange rates above.</div>');
-    html += field('Leg A unit factor',
-                  '<input class="p-factor-a" type="number" step="any" ' +
-                  'value="' + escape(draft.leg_a_factor === null ||
-                                     draft.leg_a_factor === undefined
-                                     ? '' : draft.leg_a_factor) +
-                  '" placeholder="blank = 1">' +
-                  (suggestion && suggestion.price_factor
-                    ? '<div class="hint">' + escape(suggestion.why) +
-                      ' <button class="btn tiny use-conversion" ' +
-                      'data-fx="' + escape(suggestion.fx || '') +
-                      '" data-factor="' + suggestion.price_factor +
-                      '">use ' + escape(suggestion.fx || 'no FX') + ' x ' +
-                      suggestion.price_factor + '</button></div>'
-                    : '<div class="hint">' + (suggestion
-                        ? escape(suggestion.why)
-                        : 'USD/oz → INR/10g is 0.3215, USD/oz → INR/kg ' +
-                          'is 32.15, USD/bbl → INR/bbl is 1') + '</div>'));
+    html += field('Leg A priced per',
+                  unitSelect('p-unit-a', draft.leg_a_unit) +
+                  '<div class="hint">The unit leg A\'s PRICE is quoted ' +
+                  'per — COMEX gold and silver per troy ounce, NYMEX crude ' +
+                  'per barrel.</div>');
+    html += field('Leg B priced per',
+                  unitSelect('p-unit-b', draft.leg_b_unit) +
+                  '<div class="hint">MCX gold is quoted per 10 g, MCX ' +
+                  'silver per kg, MCX crude per barrel.</div>');
+    html += field('Unit factor', factorControl(draft, suggestion));
     html += field('Pair type',
                   '<select class="p-type">' +
                   option('SPOT_FUTURE', draft.pair_type) +
@@ -861,7 +861,8 @@
                   'step="0.01" value="' + escape(draft.default_quantity) +
                   '">' + (derived
                     ? '<div class="hint">' + escape(derived.clip_derivation) +
-                      ', ' + UI.money(derived.spread_units) +
+                      ', ' + UI.money(derived.spread_units,
+                                      ((derived.specs || {}).b || {}).currency) +
                       ' per 1.00 of spread</div>' : ''));
     html += field('Quoting leg (LIMIT mode)',
                   '<select class="p-quoting">' +
@@ -885,7 +886,9 @@
         '</b></div>';
       html += '<div>Minimum this pair can trade: <b>' +
         (derived.min_notional_usd
-          ? UI.money(derived.min_notional_usd) + ' a leg' : DASH) +
+          ? UI.money(derived.min_notional_usd,
+                     ((derived.specs || {}).b || {}).currency) + ' a leg'
+          : DASH) +
         '</b> — state it before anyone tries to trade under it</div>';
       html += '<div>Contract sizes read from the brokers: A ' +
         escape((derived.specs.a || {}).contract_size) + ' · B ' +
@@ -917,6 +920,121 @@
       '<button class="btn save-pair">Save pair</button>' +
       '<button class="btn cancel-pair">Cancel</button></div></div>';
     return html;
+  }
+
+  function unitOf(key) {
+    var found = null;
+    (local.units || []).forEach(function (unit) {
+      if (unit.key === key) { found = unit; }
+    });
+    return found;
+  }
+
+  function unitSelect(cls, selected) {
+    /* Grouped by what the unit MEASURES — an ounce converts to a gram,
+     * never to a barrel — with "custom" for a broker that quotes in
+     * something this list does not have. */
+    var groups = {};
+    (local.units || []).forEach(function (unit) {
+      (groups[unit.dimension] = groups[unit.dimension] || []).push(unit);
+    });
+    var html = '<select class="' + cls + '"><option value="">' +
+      'choose…</option>';
+    Object.keys(groups).forEach(function (dimension) {
+      html += '<optgroup label="' + escape(dimension) + '">';
+      groups[dimension].forEach(function (unit) {
+        html += '<option value="' + escape(unit.key) + '"' +
+          (unit.key === selected ? ' selected' : '') + '>' +
+          escape(unit.label) + '</option>';
+      });
+      html += '</optgroup>';
+    });
+    html += '<option value="custom"' + (selected === 'custom'
+      ? ' selected' : '') + '>custom — type the factor</option>';
+    return html + '</select>';
+  }
+
+  function factorSteps(fromKey, toKey) {
+    /* The same working the server does (contracts.factor_steps), so the
+     * operator sees it change as they pick, before anything is saved. */
+    var a = unitOf(fromKey), b = unitOf(toKey);
+    if (!a || !b) { return null; }
+    if (a.dimension !== b.dimension) {
+      return {factor: null, steps: [a.key + ' measures ' + a.dimension +
+        ' and ' + b.key + ' measures ' + b.dimension +
+        ' — they do not convert']};
+    }
+    var factor = b.size / a.size;
+    return {factor: factor, steps: [
+      'Leg A is priced per ' + a.key + ' = ' + a.size + ' ' + a.base,
+      'Leg B is priced per ' + b.key + ' = ' + b.size + ' ' + b.base,
+      'one ' + b.key + ' is ' + b.size + ' ÷ ' + a.size + ' = ' +
+        factor.toPrecision(8) + ' of a ' + a.key + ', so a price per ' +
+        b.key + ' = a price per ' + a.key + ' × ' + factor.toPrecision(8),
+      'unit factor = ' + factor.toPrecision(10)]};
+  }
+
+  function factorControl(draft, suggestion) {
+    var custom = draft.leg_a_unit === 'custom' ||
+      draft.leg_b_unit === 'custom' || !draft.leg_a_unit ||
+      !draft.leg_b_unit;
+    var worked = custom ? null : factorSteps(draft.leg_a_unit,
+                                             draft.leg_b_unit);
+    var factor = worked && worked.factor !== null ? worked.factor
+      : draft.leg_a_factor;
+    var html = '<input class="p-factor-a" type="number" step="any" ' +
+      'value="' + escape(factor === null || factor === undefined ||
+                         isNaN(factor) ? '' : factor) + '"' +
+      (custom ? ' placeholder="blank = 1"'
+              : ' readonly title="computed from the two units"') + '>';
+    html += '<div class="factor-working">';
+    if (worked) {
+      html += '<ol>' + worked.steps.map(function (step) {
+        return '<li>' + escape(step) + '</li>';
+      }).join('') + '</ol>';
+      html += workedExample(draft, worked.factor);
+    } else {
+      html += '<div class="hint">Pick both units above and the factor is ' +
+        'worked out here, or choose <b>custom</b> to type one. Common: ' +
+        'oz → 10 g = 0.32150747 (gold) · oz → kg = 32.150747 (silver) · ' +
+        'bbl → bbl = 1 (crude) · lb → kg = 2.2046226 (copper)</div>';
+    }
+    if (suggestion && suggestion.price_factor) {
+      html += '<div class="hint">' + escape(suggestion.why) +
+        ' <button class="btn tiny use-conversion" data-fx="' +
+        escape(suggestion.fx || '') + '" data-factor="' +
+        suggestion.price_factor + '" data-unit-a="' +
+        escape(suggestion.unit_a || '') + '" data-unit-b="' +
+        escape(suggestion.unit_b || '') + '">use ' +
+        escape(suggestion.unit_a || '') + ' → ' +
+        escape(suggestion.unit_b || '') + '</button></div>';
+    }
+    return html + '</div>';
+  }
+
+  function workedExample(draft, factor) {
+    /* One real number pushed through the whole conversion, so the
+     * result can be held up against leg B's own price on the ladder. */
+    if (factor === null || factor === undefined) { return ''; }
+    var specs = (local.derived || {}).specs || {};
+    var a = specs.a || {};
+    var raw = a.raw_bid && a.raw_ask ? (a.raw_bid + a.raw_ask) / 2 : null;
+    var fxName = draft.leg_a_fx || '';
+    var rate = fxName ? ((local.fx || {})[fxName] || {}).rate : 1;
+    var price = raw === null ? (a.bid && a.ask && !fxName
+      ? (a.bid + a.ask) / 2 : null) : raw;
+    var sample = price === null;
+    if (sample) { price = 100; }
+    if (rate === null || rate === undefined) {
+      return '<div class="hint problem-text">' + escape(fxName) +
+        ' has no rate yet — set it under Exchange rates</div>';
+    }
+    var result = price * rate * factor;
+    return '<div class="worked">' + (sample ? 'e.g. ' : 'now: ') +
+      'A ' + UI.fmt(price, 4) + ' per ' + escape(draft.leg_a_unit) +
+      (fxName ? ' × ' + escape(fxName) + ' ' + UI.fmt(rate, 4) : '') +
+      ' × ' + factor.toPrecision(8) + ' = <b>' + UI.fmt(result, 2) +
+      '</b> per ' + escape(draft.leg_b_unit) + '</div>';
   }
 
   function field(label, control) {
@@ -970,7 +1088,16 @@
   // -- events ---------------------------------------------------------------
 
   function onChange(e) {
-    if (e.target.closest('.pair-form')) { readDraft(); }
+    if (e.target.closest('.pair-form')) {
+      readDraft();
+      // A unit picked is a factor worked out: redraw so the working
+      // and the example follow the choice at once.
+      if (e.target.classList.contains('p-unit-a') ||
+          e.target.classList.contains('p-unit-b') ||
+          e.target.classList.contains('p-fx-a')) {
+        render(false);
+      }
+    }
     if (e.target.classList.contains('f-kind')) {
       kindClass(e.target.closest('tr'));
     }
@@ -1033,6 +1160,10 @@
       readDraft();
       local.draft.leg_a_fx = button.dataset.fx || '';
       local.draft.leg_a_factor = parseFloat(button.dataset.factor);
+      if (button.dataset.unitA && button.dataset.unitB) {
+        local.draft.leg_a_unit = button.dataset.unitA;
+        local.draft.leg_b_unit = button.dataset.unitB;
+      }
       return render(false);
     }
     if (button.classList.contains('connect-account')) {
@@ -1078,6 +1209,10 @@
         leg_b_symbol: (pair.leg_b || {}).symbol,
         leg_a_fx: (pair.leg_a || {}).fx || '',
         leg_a_factor: (pair.leg_a || {}).price_factor,
+        leg_a_unit: (pair.leg_a || {}).price_unit ||
+          ((pair.leg_a || {}).price_factor ? 'custom' : ''),
+        leg_b_unit: (pair.leg_b || {}).price_unit ||
+          ((pair.leg_a || {}).price_factor ? 'custom' : ''),
         expiry: pair.expiry || '',
       };
       local.derived = null;
@@ -1275,6 +1410,8 @@
       leg_b_account: value('.p-account-b'),
       leg_b_symbol: value('.p-symbol-b'),
       leg_a_fx: value('.p-fx-a').toUpperCase(),
+      leg_a_unit: value('.p-unit-a'),
+      leg_b_unit: value('.p-unit-b'),
       leg_a_factor: value('.p-factor-a') === ''
         ? null : parseFloat(value('.p-factor-a')),
       expiry: value('.p-expiry') || null
@@ -1309,11 +1446,13 @@
       // longer shows.
       leg_a: {account: draft.leg_a_account, symbol: draft.leg_a_symbol,
               fx: draft.leg_a_fx || '',
+              price_unit: draft.leg_a_unit || '',
               price_factor: (draft.leg_a_factor === null ||
                              draft.leg_a_factor === undefined ||
                              isNaN(draft.leg_a_factor))
                 ? '' : draft.leg_a_factor},
-      leg_b: {account: draft.leg_b_account, symbol: draft.leg_b_symbol},
+      leg_b: {account: draft.leg_b_account, symbol: draft.leg_b_symbol,
+              price_unit: draft.leg_b_unit || ''},
       pair_type: draft.pair_type,
       hedge_ratio: draft.hedge_ratio,
       increment: draft.increment,

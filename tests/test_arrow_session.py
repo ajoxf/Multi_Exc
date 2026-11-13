@@ -431,3 +431,10 @@ def test_the_terminal_report_says_netting_and_that_it_is_handled(arrow):
     report = session.terminal_report()
     assert report['hedging'] is False and report['netting_ledger'] is True
     assert report['logged_in'] and report['login'] == 'U1'
+
+
+def test_a_symbol_asked_for_the_first_time_is_priced_at_once(arrow):
+    session, _ = arrow
+    assert session.symbol_tick('CRUDEOIL19NOV25FUT') is not None
+    # Inside the batch window, a DIFFERENT symbol is still priced.
+    assert session.symbol_tick('GOLD05DEC25FUT') is not None

@@ -218,6 +218,31 @@
   </section>
 </template>
 
+<template id="chart-template">
+  <!-- The live graphs, one window per ladder (as in arrow-statarb):
+       the spread with its executable band, its z-score against its own
+       recent range, and both legs in the same money. A picture of the
+       market — nothing reads it to decide anything. -->
+  <section class="window chartwin">
+    <div class="titlebar">
+      <span class="swatch"></span>
+      <span class="title cw-pair"></span>
+      <span class="winbtns"><button class="winbtn close" title="Close this chart">&times;</button></span>
+    </div>
+    <div class="cw-bar">
+      <label>Range <select class="cw-range">
+        <option value="300">5 min</option>
+        <option value="900" selected>15 min</option>
+        <option value="1800">30 min</option>
+        <option value="3600">1 hour</option>
+      </select></label>
+      <span class="cw-now"></span>
+    </div>
+    <canvas class="cw-canvas" width="560" height="420"></canvas>
+    <div class="cw-note hint"></div>
+  </section>
+</template>
+
 <template id="ladder-template">
   <section class="window ladder">
     <div class="titlebar">
@@ -225,7 +250,7 @@
       <span class="title"></span>
       <span class="route"></span>
       <span class="mode-badge"></span>
-      <span class="winbtns"><button class="winbtn ladder-cog" title="This ladder's own settings — mode, exit costs, AutoRoute, carry">&#9881;</button><button class="winbtn close" title="Close this ladder">&times;</button></span>
+      <span class="winbtns"><button class="winbtn ladder-chart" title="Live chart — open or close this ladder's graphs">&#128200;</button><button class="winbtn ladder-cog" title="This ladder's own settings — mode, exit costs, AutoRoute, carry">&#9881;</button><button class="winbtn close" title="Close this ladder">&times;</button></span>
     </div>
     <div class="quotestrip">
       <span class="netchg">—</span>

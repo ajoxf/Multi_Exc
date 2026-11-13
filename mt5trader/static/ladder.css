@@ -1979,3 +1979,26 @@ table.grid-form td input + input { margin-top: 2px; }
 .cross-strip.alert { background: #ffd9d9; color: #8a0000; font-weight: bold; }
 
 table.grid-form select.f-kind { min-width: 96px; }
+
+/* The unit factor, worked out where it is chosen. */
+.pair-form .factor-working ol { margin: 3px 0 2px 16px; padding: 0;
+  font-size: 10px; color: #333; }
+.pair-form .factor-working .worked { font-size: 10px; background: #eef6ee;
+  border: 1px solid #b9d8b9; padding: 2px 4px; margin-top: 2px; }
+.pair-form input[readonly] { background: #f2f2f2; }
+
+/* The live chart window — one per ladder, opened from the ladder's
+   chart button or the + menu. */
+.window.chartwin { width: 580px; }
+.window.chartwin .cw-bar { display: flex; gap: 12px; align-items: center;
+  padding: 3px 6px; font-size: 11px; border-bottom: 1px solid #ddd; }
+.window.chartwin .cw-now { font-family: var(--mono, monospace); font-size: 11px; }
+.window.chartwin .cw-canvas { display: block; width: 560px; height: 420px;
+  margin: 4px 10px 0; background: #fff; }
+.window.chartwin .cw-note { padding: 2px 8px 6px; font-size: 10px; }
+/* With the chart button the bar holds three buttons: the title gives
+   way, the buttons never wrap onto a second line. */
+.titlebar .winbtns { flex-shrink: 0; white-space: nowrap; }
+.titlebar .title, .titlebar .route { min-width: 0; flex-shrink: 1; }
+.titlebar .mode-badge { flex-shrink: 0; }
+.cross-strip { border-bottom: 1px solid #ddd; }

@@ -370,3 +370,33 @@ def test_a_spread_entered_and_closed_across_the_two_currencies(cross):
                                      coordinator.market[pair.key])
     assert getattr(closed, 'ok', closed), getattr(closed, 'reason', closed)
     assert not position.is_open
+
+
+def test_a_rupee_pair_says_its_money_is_rupees(cross):
+    coordinator, _config, pair, _legs, _book, _clock = cross
+    coordinator.poll_once()
+    snap = coordinator.snapshot()
+    assert snap['pairs'][pair.key]['currency'] == 'INR'
+    assert snap['money_currency'] == 'INR'
+
+
+def test_the_chart_series_is_recorded_as_the_engine_polls(cross):
+    coordinator, _config, pair, _legs, _book, _clock = cross
+    coordinator.poll_once()
+    rows = coordinator.history.series(pair.key)
+    assert rows and rows[-1]['spread'] == pytest.approx(5901.0 - 70.01 * 84.0)
+    assert rows[-1]['fx'] == 84.0
+
+
+def test_silver_100_is_its_own_contract_priced_per_ten_grams():
+    """Not the 30 kg SILVER whose name it starts with."""
+    spec = contracts.spec_for('SILVER10026DECFUT', 'MCX')
+    assert spec.root == 'SILVER100'
+    assert spec.contract_size == pytest.approx(10.0)      # 100 g / 10 g
+    conv = contracts.suggest_conversion('SIH7', 'SILVER10026DECFUT')
+    assert conv['unit_b'] == '10g'
+    assert conv['price_factor'] == pytest.approx(0.3215074657)
+    # The others are unchanged: 30 kg, 5 kg, 1 kg, all priced per kg.
+    for symbol, size in (('SILVER05MAR27FUT', 30.0), ('SILVERM27FEB27FUT', 5.0),
+                         ('SILVERMIC27FEB27FUT', 1.0)):
+        assert contracts.spec_for(symbol, 'MCX').contract_size == size

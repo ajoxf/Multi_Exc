@@ -21,13 +21,28 @@
     }
   },
   "fx": {
-    "USDINR": {"source": "manual", "rate": 88.50, "set_at": 0, "max_age_hours": 24}
+    "USDINR": {
+      "source": "manual",
+      "rate": 88.5,
+      "set_at": 0,
+      "max_age_hours": 24
+    }
   },
   "pairs": {
     "CLF7|CRUDEOIL18DEC26FUT": {
       "name": "Crude: MCX vs NYMEX",
-      "leg_a": {"account": "cme", "symbol": "CLF7", "fx": "USDINR", "price_factor": 1.0},
-      "leg_b": {"account": "mcx", "symbol": "CRUDEOIL18DEC26FUT"},
+      "leg_a": {
+        "account": "cme",
+        "symbol": "CLF7",
+        "fx": "USDINR",
+        "price_factor": 1.0,
+        "price_unit": "bbl"
+      },
+      "leg_b": {
+        "account": "mcx",
+        "symbol": "CRUDEOIL18DEC26FUT",
+        "price_unit": "bbl"
+      },
       "pair_type": "RELATED",
       "hedge_ratio": 1.0,
       "hedge_ratio_for": "CLF7|CRUDEOIL18DEC26FUT",
@@ -42,8 +57,18 @@
     },
     "GCG7|GOLD05FEB27FUT": {
       "name": "Gold: MCX vs COMEX",
-      "leg_a": {"account": "cme", "symbol": "GCG7", "fx": "USDINR", "price_factor": 0.3215074657},
-      "leg_b": {"account": "mcx", "symbol": "GOLD05FEB27FUT"},
+      "leg_a": {
+        "account": "cme",
+        "symbol": "GCG7",
+        "fx": "USDINR",
+        "price_factor": 0.3215074657,
+        "price_unit": "oz"
+      },
+      "leg_b": {
+        "account": "mcx",
+        "symbol": "GOLD05FEB27FUT",
+        "price_unit": "10g"
+      },
       "pair_type": "RELATED",
       "hedge_ratio": 1.0,
       "hedge_ratio_for": "GCG7|GOLD05FEB27FUT",
@@ -58,8 +83,18 @@
     },
     "SIH7|SILVER05MAR27FUT": {
       "name": "Silver: MCX vs COMEX",
-      "leg_a": {"account": "cme", "symbol": "SIH7", "fx": "USDINR", "price_factor": 32.150746568},
-      "leg_b": {"account": "mcx", "symbol": "SILVER05MAR27FUT"},
+      "leg_a": {
+        "account": "cme",
+        "symbol": "SIH7",
+        "fx": "USDINR",
+        "price_factor": 32.150746568,
+        "price_unit": "oz"
+      },
+      "leg_b": {
+        "account": "mcx",
+        "symbol": "SILVER05MAR27FUT",
+        "price_unit": "kg"
+      },
       "pair_type": "RELATED",
       "hedge_ratio": 1.0,
       "hedge_ratio_for": "SIH7|SILVER05MAR27FUT",

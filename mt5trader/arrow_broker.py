@@ -370,8 +370,11 @@ class ArrowSession:
 
     def ensure_symbol(self, symbol):
         info = self.symbol_info(symbol)
-        if info is not None:
+        if info is not None and info.name not in self._subscribed:
             self._subscribed.add(info.name)
+            # A NEW symbol is quoted now, not at the next batch: waiting
+            # out the batch made a just-added leg read as dark.
+            self._quoted_at = 0.0
         return info
 
     def resubscribe(self, symbol):

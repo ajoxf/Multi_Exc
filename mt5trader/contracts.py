@@ -53,6 +53,63 @@ UNITS = {
 }
 
 
+#: How each unit is named on the screen, in the order the dropdown
+#: offers them.
+UNIT_LABELS = {
+    'bbl': 'barrel (bbl)',
+    'oz': 'troy ounce (oz t, 31.1035 g)',
+    'g': 'gram (g)',
+    '8g': '8 grams (MCX Gold Guinea)',
+    '10g': '10 grams (MCX gold quote)',
+    '100g': '100 grams',
+    'kg': 'kilogram (kg, MCX silver quote)',
+    'lb': 'pound (lb, 453.592 g)',
+    'tonne': 'metric tonne',
+    'mmbtu': 'million BTU (mmBtu)',
+}
+_BASE_NAMES = {'mass': 'g', 'volume': 'bbl', 'energy': 'mmBtu'}
+
+
+def units_table():
+    """Every unit the dropdown offers, with its size in its dimension's
+    base quantity — what the screen needs to show a factor's working."""
+    return [{'key': key, 'label': UNIT_LABELS.get(key, key),
+             'dimension': UNITS[key][0], 'base': _BASE_NAMES[UNITS[key][0]],
+             'size': UNITS[key][1]}
+            for key in UNIT_LABELS]
+
+
+def factor_steps(from_unit, to_unit):
+    """The unit factor AND its working, line by line, so the number on
+    the pair can be checked by hand rather than trusted:
+
+        Leg A is priced per 1 oz = 31.1034768 g
+        Leg B is priced per 10g  = 10 g
+        a price per 10g is a price per oz x (10 / 31.1034768)
+        unit factor = 0.32150747
+
+    None when the two units are of different kinds (an ounce is not a
+    barrel) — there is no factor, and the screen says so.
+    """
+    a = UNITS.get(_unit(from_unit))
+    b = UNITS.get(_unit(to_unit))
+    if a is None or b is None:
+        return None
+    if a[0] != b[0]:
+        return {'factor': None, 'steps': [
+            f'{from_unit} measures {a[0]} and {to_unit} measures {b[0]} — '
+            f'they do not convert']}
+    base = _BASE_NAMES[a[0]]
+    factor = b[1] / a[1]
+    return {'factor': factor, 'steps': [
+        f'Leg A is priced per {from_unit} = {a[1]:.10g} {base}',
+        f'Leg B is priced per {to_unit} = {b[1]:.10g} {base}',
+        f'one {to_unit} is {b[1]:.10g} / {a[1]:.10g} = {factor:.8g} of a '
+        f'{from_unit}, so a price per {to_unit} is a price per '
+        f'{from_unit} x {factor:.8g}',
+        f'unit factor = {factor:.10g}']}
+
+
 def unit_factor(from_unit, to_unit):
     """What to multiply a price PER `from_unit` by to get the price PER
     `to_unit`. None when the two cannot be compared.
@@ -131,6 +188,11 @@ SPECS = [
     Spec('GOLDTEN', 'MCX', 'INR', '10g', 10, 'g', 1.0, 'MCX Gold Ten'),
     Spec('GOLDM', 'MCX', 'INR', '10g', 100, 'g', 1.0, 'MCX Gold Mini'),
     Spec('GOLD', 'MCX', 'INR', '10g', 1, 'kg', 1.0, 'MCX Gold'),
+    # 100 g, quoted per 10 g like gold — NOT per kg like the other
+    # silvers (launched 1 June 2026). Without its own row, longest-root
+    # matching handed SILVER100 to SILVER's 30 kg spec: money out 3x and
+    # the unit factor out 100x.
+    Spec('SILVER100', 'MCX', 'INR', '10g', 100, 'g', 1.0, 'MCX Silver 100'),
     Spec('SILVERMIC', 'MCX', 'INR', 'kg', 1, 'kg', 1.0, 'MCX Silver Micro'),
     Spec('SILVERM', 'MCX', 'INR', 'kg', 5, 'kg', 1.0, 'MCX Silver Mini'),
     Spec('SILVER', 'MCX', 'INR', 'kg', 30, 'kg', 1.0, 'MCX Silver'),
@@ -250,6 +312,7 @@ def suggest_conversion(symbol_a, symbol_b, exchange_b='MCX'):
                        f'per {unit_b} — those do not convert'}
     fx = None if cur_a == cur_b else f'{cur_a}{cur_b}'
     return {'fx': fx, 'price_factor': round(factor, 10),
+            'unit_a': unit_a, 'unit_b': unit_b,
             'why': (f'A is {cur_a}/{unit_a}, B is {cur_b}/{unit_b}: '
                     f'A x {fx + " x " if fx else ""}{factor:.8g} '
                     f'is A in B\'s {cur_b}/{unit_b}')}
@@ -379,6 +442,21 @@ def fmt_expiry(epoch):
     if epoch is None:
         return '—'
     return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime('%d-%b-%Y')
+
+
+CURRENCY_SIGNS = {'USD': '$', 'INR': '\u20b9', 'EUR': '\u20ac',
+                  'GBP': '\u00a3', 'JPY': '\u00a5'}
+
+
+def money_text(value, currency=None, digits=2):
+    """A money figure in ITS OWN currency: Rs. for a rupee leg, $ for a
+    dollar one, the code for anything else. Unknown currency is written
+    as dollars only because that is what the single-currency terminal
+    always meant by it."""
+    code = (currency or 'USD').upper()
+    mark = CURRENCY_SIGNS.get(code, code + ' ')
+    sign = '-' if value < 0 else ''
+    return f'{sign}{mark}{abs(value):,.{digits}f}'
 
 
 def is_finite(value):
