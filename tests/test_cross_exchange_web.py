@@ -191,3 +191,26 @@ def test_a_contract_set_on_the_ladder_drops_the_lot_it_came_from(client,
     pair = cfg.load_raw(paths['config'])['pairs']['SIH7|SILVERM']
     assert pair['contract_size_b'] == 6
     assert 'lot_quantity' not in pair['leg_b']
+
+
+def test_the_alert_settings_are_saved_on_the_pair(client, paths):
+    post(client, '/api/pairs/CL|CRUDE', {
+        'arb_alert': True, 'arb_margin': 20, 'arb_normal_pct': 0,
+        'arb_z': 2.5, 'arb_extra_cost': 1.2})
+    pair = cfg.load_raw(paths['config'])['pairs']['CL|CRUDE']
+    assert pair['arb_alert'] is True and pair['arb_margin'] == 20
+    assert pair['arb_z'] == 2.5 and pair['arb_extra_cost'] == 1.2
+
+
+def test_telegram_status_never_shows_the_token(client, paths, tmp_path,
+                                               monkeypatch):
+    monkeypatch.delenv('TELEGRAM_BOT_TOKEN', raising=False)
+    monkeypatch.delenv('TELEGRAM_CHAT_ID', raising=False)
+    assert client.get('/api/notify').get_json()['telegram'] is False
+    refused = client.post('/api/notify/test')
+    assert refused.status_code == 400
+    assert 'TELEGRAM_BOT_TOKEN' in refused.get_json()['error']
+    (tmp_path / '.env').write_text('TELEGRAM_BOT_TOKEN="S3CR3T"\n'
+                                   'TELEGRAM_CHAT_ID="42"\n')
+    body = client.get('/api/notify').get_json()
+    assert body['telegram'] is True and 'S3CR3T' not in json.dumps(body)

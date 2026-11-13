@@ -70,8 +70,11 @@
   function refresh() {
     return Promise.all([
       api('/api/accounts'), api('/api/pairs'), api('/api/settings'),
-      api('/api/lock'), api('/api/fx'), api('/api/units')
+      api('/api/lock'), api('/api/fx'), api('/api/units'),
+      api('/api/notify')
     ]).then(function (results) {
+      local.telegram = !!(results[6] && results[6].body &&
+                          results[6].body.telegram);
       // The units a leg can be priced per, with their sizes: the unit
       // factor is worked out from these, on the screen, step by step.
       local.units = (results[5] && results[5].body &&
@@ -578,7 +581,17 @@
         '<td class="actions"><button class="btn save-fx">Set</button>' +
         '</td></tr>';
     });
-    return html + '</tbody></table>';
+    html += '</tbody></table>';
+    // Where the arbitrage alerts go besides this screen.
+    html += '<div class="telegram-row">Arbitrage alerts to Telegram: ' +
+      (local.telegram
+        ? '<b>set up</b> <button class="btn tiny test-telegram">Send test' +
+          '</button>'
+        : '<b class="problem-text">not set up</b> — put TELEGRAM_BOT_TOKEN ' +
+          'and TELEGRAM_CHAT_ID in .env (docs/SETUP.md). Alerts still show ' +
+          'here and sound.') +
+      ' Each pair\'s alert is switched on in its ladder ⚙ settings.</div>';
+    return html;
   }
 
   function saveFx(row) {
@@ -1340,6 +1353,12 @@
     }
     if (button.classList.contains('save-fx')) {
       return saveFx(row);
+    }
+    if (button.classList.contains('test-telegram')) {
+      return api('/api/notify/test', {method: 'POST'}).then(function (r) {
+        UI.toast(r.ok ? 'test message sent to Telegram'
+                      : r.body.error, r.ok ? 'ok' : undefined);
+      });
     }
     if (button.classList.contains('use-clip')) {
       readDraft();

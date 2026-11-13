@@ -155,6 +155,8 @@ class Publisher:
                            self.broker_pendings, self.max_qty)
         if at is not None:
             payload['at'] = at
+        if getattr(self, 'arb_events', None) is not None:
+            payload['arb_events'] = self.arb_events
         # A tmp name of its OWN. The timer thread and the test publish
         # at the same moment often enough to matter: sharing one tmp
         # file, the slower writer's file is gone before it renames it,
@@ -5113,3 +5115,34 @@ def test_a_lot_typed_on_the_pair_form_shows_its_contract_size_at_once(page):
     assert page.evaluate("document.activeElement.className") == 'p-lotqty-b'
     page.click('.window.settings .cancel-pair')
     page.click('.window.settings .close')
+
+
+def test_a_new_arbitrage_alert_is_announced_once_and_not_replayed(server,
+                                                                   page):
+    """The banner names the pair and the edge, and says nothing was sent.
+    An alert that was already there when the page loaded is not replayed."""
+    url, paths = server
+    publisher = paths['publisher']
+    import time as _time
+    old = {'id': int((_time.time() - 600) * 1000), 'at': _time.time() - 600,
+           'pair': 'XAUUSD_|GC1226', 'text': 'OLD alert'}
+    publisher.arb_events = [old]
+    page.reload()
+    page.wait_for_selector('.window.ladder', timeout=WAIT)
+    page.wait_for_timeout(800)
+    assert page.locator('#arb-banner').count() == 0
+    page.wait_for_timeout(500)
+    assert page.locator('#arb-banner').count() == 0
+    fresh = _time.time() + 60
+    publisher.arb_events = [old, {'id': int(fresh * 1000), 'at': fresh,
+                                  'pair': 'XAUUSD_|GC1226',
+                                  'text': 'Gold basis: MCX RICH — net edge '
+                                          '22.00 per unit. Alert only — '
+                                          'nothing was sent.'}]
+    page.wait_for_selector('#arb-banner', timeout=WAIT)
+    text = page.text_content('#arb-banner')
+    assert 'ARBITRAGE ALERT' in text and 'nothing was sent' in text
+    assert 'OLD alert' not in text
+    page.click('#arb-banner .dismiss')
+    page.wait_for_selector('#arb-banner', state='detached', timeout=WAIT)
+    publisher.arb_events = None

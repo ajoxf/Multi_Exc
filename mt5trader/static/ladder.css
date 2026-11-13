@@ -2016,3 +2016,17 @@ table.grid-form select.f-kind { min-width: 96px; }
   text-overflow: ellipsis; }
 .cross-strip .cs-line.warn { background: #fff4d6; color: #7a4b00; }
 .cross-strip .cs-line.alert { background: #ffd9d9; color: #8a0000; font-weight: bold; }
+/* The arbitrage alert: its line on the ladder strip, and its banner. */
+.cross-strip .cs-line.arb { background: #e6d9ff; color: #3d1a78; font-weight: bold; }
+.cross-strip .cs-line.muted { color: #777; }
+#arb-banner { position: fixed; top: 0; left: 50%; transform: translateX(-50%);
+  z-index: 10000; max-width: 90vw; background: #3d1a78; color: #fff;
+  padding: 6px 30px 6px 12px; font-size: 12px; border-radius: 0 0 4px 4px;
+  box-shadow: 0 2px 6px rgba(0,0,0,.3); }
+#arb-banner .dismiss { position: absolute; right: 8px; top: 4px; cursor: pointer;
+  font-size: 16px; }
+.telegram-row { font-size: 11px; padding: 4px 2px 8px; }
+/* The ladder is a column whose price grid takes the rest: the strip must
+   never be the thing that shrinks, or its last lines — the warnings —
+   are cut off. */
+.window.ladder .cross-strip { flex-shrink: 0; overflow: visible; }

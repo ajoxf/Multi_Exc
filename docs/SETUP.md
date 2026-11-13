@@ -67,6 +67,46 @@ page:
    the first trade.
 5. Place a **one-lot** test on each MCX symbol before trading size.
 
+## Arbitrage alerts
+
+The terminal can tell you when a gap is unusually wide — it never trades
+it for you. Per ladder, open ⚙ and fill in **Arbitrage alert**:
+
+| Field | Crude (MCX vs NYMEX) | Gold / silver |
+|---|---|---|
+| Arb alert | ticked | ticked |
+| Normal gap | 0 | 0 |
+| Normal gap % | 0 | the usual MCX premium, e.g. 6 |
+| Edge needed | e.g. 20 (Rs per bbl, after costs) | e.g. 300 (Rs per 10 g) / 400 (Rs per kg) |
+| Other cost/unit | CTT and fees per unit, e.g. 1 | likewise |
+| Sigmas | 2 (0 = off) | 2 |
+| USDINR hedge/lot | your round-trip cost per NSE USDINR lot, in Rs | same |
+| USDINR lot $ | blank (= $1,000) | blank |
+
+Commission per lot (also on ⚙) and the exit crossing are counted
+automatically. So is the USDINR hedge: the dollar leg's notional is
+turned into NSE USDINR lots (1 CL at $88.40 = $88,400 = 88 lots) and
+multiplied by the cost per lot you type. With no cost typed the alert
+still fires but says the hedge is NOT costed. The alert also says which
+way to hedge: MCX rich (sell MCX / buy CME) → buy USDINR; MCX cheap →
+sell USDINR. An alert shows on the ladder, as a banner and a sound, in
+the log, and — if set up — on Telegram.
+
+To get alerts on your phone:
+
+1. In Telegram, message **@BotFather**, send `/newbot`, and copy the token.
+2. Send any message to your new bot.
+3. Open `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser
+   and copy the `chat` → `id` number.
+4. Put both in `.env` (never in config.json):
+
+```bash
+TELEGRAM_BOT_TOKEN="123456:ABC..."
+TELEGRAM_CHAT_ID="123456789"
+```
+
+5. Exchanges page → **Send test** under Exchange rates.
+
 ## Running the pieces separately (while setting up)
 
 ```bash

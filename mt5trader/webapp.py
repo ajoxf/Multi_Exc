@@ -32,6 +32,7 @@ from .commands import CommandLog
 from .legs import RemoteLeg
 from .convert import Conversion, ConvertedLeg, conversions_from_config
 from .fx import FxBook, manual_entry, parse_pair
+from .notify import TelegramNotifier
 
 #: How old the status file may be before the UI says the engine is not
 #: running. Six polls at the default 0.3s: long enough not to flicker,
@@ -971,6 +972,40 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                         'points': rows,
                         'engine': bool(data)})
 
+    def telegram():
+        # Read from .env each time, so a token added there works without
+        # restarting the web process. Never echoed back to the page.
+        try:
+            from dotenv import dotenv_values
+            env = dotenv_values(os.path.join(os.path.dirname(
+                os.path.abspath(config_path)) or '.', '.env'))
+        except ImportError:
+            env = {}
+        return TelegramNotifier(
+            token=env.get('TELEGRAM_BOT_TOKEN')
+            or os.environ.get('TELEGRAM_BOT_TOKEN'),
+            chat_id=env.get('TELEGRAM_CHAT_ID')
+            or os.environ.get('TELEGRAM_CHAT_ID'),
+            background=False)
+
+    @app.get('/api/notify')
+    def api_notify():
+        """Whether arbitrage alerts can reach a phone — never the token."""
+        return jsonify({'ok': True, 'telegram': telegram().configured})
+
+    @app.post('/api/notify/test')
+    def api_notify_test():
+        sender = telegram()
+        if not sender.configured:
+            return jsonify({'ok': False, 'error': (
+                'Telegram is not set up: put TELEGRAM_BOT_TOKEN and '
+                'TELEGRAM_CHAT_ID in .env (see docs/SETUP.md)')}), 400
+        if not sender.send('Multi_Exc: test message — arbitrage alerts '
+                           'will arrive here.'):
+            return jsonify({'ok': False, 'error': (
+                f'Telegram refused it: {sender.last_error}')}), 502
+        return jsonify({'ok': True})
+
     @app.get('/api/units')
     def api_units():
         """The units a leg can be priced per, and their sizes — the
@@ -1228,7 +1263,11 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                       'slippage_allowance', 'break_even_nights',
                       'tp_target_pct_of_margin',
                       'carry_rate_pct',
-                      'show_fair_window', 'algo', 'algo_window'):
+                      'show_fair_window', 'algo', 'algo_window',
+                      # The arbitrage ALERT — never an order.
+                      'arb_alert', 'arb_normal', 'arb_normal_pct',
+                      'arb_margin', 'arb_extra_cost', 'arb_z',
+                      'fx_hedge_cost_per_lot', 'fx_hedge_lot_usd'):
             if field in payload:
                 if field in ('leg_a', 'leg_b') and isinstance(
                         payload[field], dict):

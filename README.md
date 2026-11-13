@@ -75,6 +75,28 @@ future if you need to; this terminal shows it rather than hiding it.
   leaves the other unhedged. An expired leg is a red alert. MCX and CME
   contracts of the "same" month expire on different days.
 
+### Arbitrage alerts — alert only, never an order
+
+Each ladder can watch its own gap and say when it is worth looking at:
+on the ladder (a purple ARBITRAGE line), as a banner with a sound of its
+own, in the log, and on Telegram. It fires when BOTH are true:
+
+* the **executable** gap, after costs, beyond this pair's normal, clears
+  the edge needed — MCX rich: `MCX bid − CME ask × FX × factor − normal −
+  costs`; MCX cheap: the mirror. Costs are commission on both legs both
+  ends, the crossing still to pay on the way out, the **USDINR hedge**
+  (the dollar leg's notional in NSE lots — $88,400 = 88 lots — times the
+  round-trip cost per lot you type), and any per-unit extra (CTT, fees). "Normal" is typed per pair: about 0 for crude, the usual
+  duty premium for gold and silver.
+* the spread is unusual against its own last five minutes (z-score past
+  the sigmas set; 0 turns this test off).
+
+A stale leg, a desynced jump or a stale USDINR suppresses it — that is
+how a fake gap looks. It fires once, and re-arms only when the edge has
+fallen back below half the margin. It reads the snapshot and **never
+sends an order**; the trader decides and clicks. Set up per ladder under
+⚙ → Arbitrage alert; Telegram in `.env` (see docs/SETUP.md).
+
 ### Live charts
 
 Each ladder has a live chart window, as arrow-statarb does: the spread

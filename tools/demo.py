@@ -50,6 +50,12 @@ def main():
     config = json.load(open(os.path.join(REPO, 'config.example.json')))
     config['fx']['USDINR'] = {'source': 'manual', 'rate': 88.52,
                               'set_at': time.time(), 'max_age_hours': 24}
+    # The arbitrage alert, on, for the crude ladder — with a USDINR
+    # hedge cost so the alert shows it in its cost.
+    crude_key = next(k for k in config['pairs'] if k.startswith('CL'))
+    config['pairs'][crude_key].update({
+        'arb_alert': True, 'arb_margin': 15.0, 'arb_normal': 0.0,
+        'arb_extra_cost': 1.0, 'arb_z': 2.0, 'fx_hedge_cost_per_lot': 40.0})
     config_path = os.path.join(RUN, 'config.json')
     with open(config_path, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=2)
@@ -97,9 +103,21 @@ def main():
 
     rng = random.Random(7)
 
+    started = time.time()
+
     def drift():
+        dislocated = False
         while True:
             time.sleep(0.5)
+            # A DISLOCATION, scripted, so the arbitrage alert can be seen:
+            # after 90s MCX crude jumps Rs 45 rich for 30s, then returns.
+            age = time.time() - started
+            jump = 45.0 if 90 <= age < 120 else 0.0
+            if (jump > 0) != dislocated:
+                dislocated = jump > 0
+                bid, ask = exchange.book['CRUDEOIL18DEC26FUT']
+                shift = 45.0 if dislocated else -45.0
+                exchange.book['CRUDEOIL18DEC26FUT'] = (bid + shift, ask + shift)
             for sym in cme.symbols.values():
                 step = sym.tick_size * rng.choice((-2, -1, 0, 1, 2))
                 width = sym.ask - sym.bid
@@ -122,6 +140,8 @@ def main():
                          cwd=RUN, env=env),
     ]
     print(f'\n  Demo running — open http://127.0.0.1:{WEB_PORT}\n'
+          f'  MCX crude jumps Rs 45 rich after 90s for 30s: watch the '
+          f'arbitrage alert.\n'
           f'  Simulated brokers only. Files in {RUN}. Ctrl+C to stop.\n',
           flush=True)
     try:

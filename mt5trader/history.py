@@ -18,6 +18,7 @@ market that did not happen.
 """
 
 import collections
+import itertools
 import time as time_mod
 
 #: Seconds between samples, and how many are kept: an hour at one a
@@ -83,6 +84,14 @@ class SpreadHistory:
         if since is not None:
             rows = [r for r in rows if r['t'] > since]
         return rows
+
+    def tail(self, key, n):
+        """The newest `n` points — without copying the whole hour."""
+        series = self._series.get(key)
+        if not series:
+            return []
+        start = max(0, len(series) - int(n))
+        return list(itertools.islice(series, start, None))
 
     def payload(self):
         return {'at': self.clock(), 'sample_sec': self.sample_sec,

@@ -449,6 +449,36 @@
                  title="On a fill, rest a working order to close that position at the take-profit, priced from the price it actually filled at. It arms a TARGET AND NO STOP: the position runs until the target, the overnight rule, or you.">
             <span>AutoRoute</span>
             <input type="checkbox" class="ls-auto-route"></label>
+          <!-- The ARBITRAGE ALERT: it tells the trader, it never orders.
+               Normal + margin + sigmas: all three must say "unusual". -->
+          <div class="lsf-note ls-arb-head"><b>Arbitrage alert</b> — screen,
+            sound and Telegram when the gap after costs is unusually wide.
+            It never places an order.</div>
+          <label class="lsf check-row"
+                 title="Watch this pair's executable gap and alert when it clears the margin AND is unusual against its own recent history. Alert only.">
+            <span>Arb alert</span>
+            <input type="checkbox" class="ls-arb-alert"></label>
+          <label class="lsf"><span>Normal gap</span>
+            <input class="ls-arb-normal" type="number" step="any" placeholder="0"
+                   title="What this pair's gap normally is, in spread units (Rs per bbl / per 10 g / per kg). Crude: about 0. Added to the % below."></label>
+          <label class="lsf"><span>Normal gap %</span>
+            <input class="ls-arb-normal-pct" type="number" step="any" placeholder="0"
+                   title="The normal gap as a percent of leg B's price — MCX gold and silver carry import duty and sit a few percent above COMEX."></label>
+          <label class="lsf"><span>Edge needed</span>
+            <input class="ls-arb-margin" type="number" min="0" step="any" placeholder="required"
+                   title="The net edge, AFTER costs, the gap must clear beyond normal before it alerts — in spread units, e.g. 20 = Rs 20 per bbl."></label>
+          <label class="lsf"><span>Other cost/unit</span>
+            <input class="ls-arb-extra" type="number" min="0" step="any" placeholder="0"
+                   title="Per-unit costs not in the commission boxes — CTT, exchange fees, stamp duty — in spread units. Commission and the exit crossing are already counted."></label>
+          <label class="lsf"><span>USDINR hedge/lot</span>
+            <input class="ls-fx-hedge-cost" type="number" min="0" step="any" placeholder="not costed"
+                   title="What ONE NSE USDINR futures lot costs you ROUND TRIP, all-in — brokerage, fees, bid/offer — in rupees. The number of lots is worked out from leg A's dollar notional (e.g. $88,400 = 88 lots) and the total goes into the alert's cost."></label>
+          <label class="lsf"><span>USDINR lot $</span>
+            <input class="ls-fx-hedge-lot" type="number" min="1" step="any" placeholder="1000"
+                   title="Dollars in one USDINR futures lot. NSE's is $1,000."></label>
+          <label class="lsf"><span>Sigmas</span>
+            <input class="ls-arb-z" type="number" min="0" step="any" placeholder="2"
+                   title="How unusual against the last 5 minutes: the spread's z-score must be past this many sigmas in the same direction. 0 turns this test off."></label>
           <label class="lsf"><span>Comm/lot A</span>
             <input class="ls-comm-a" type="number" min="0" step="0.01" placeholder="default"></label>
           <label class="lsf"><span>Comm/lot B</span>

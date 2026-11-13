@@ -203,6 +203,10 @@
     placed: [{hz: 880, ms: 70, gain: 0.05}],
     filled: [{hz: 660, ms: 80, gain: 0.07}, {hz: 1040, ms: 130, gain: 0.07}],
     cancelled: [{hz: 320, ms: 110, gain: 0.05}],
+    // Three quick rising notes, unlike any order sound: an ALERT, not
+    // something that happened to a position.
+    arb: [{hz: 660, ms: 90, gain: 0.07}, {hz: 880, ms: 90, gain: 0.07},
+          {hz: 1175, ms: 160, gain: 0.07}],
     refused: [{hz: 180, ms: 200, gain: 0.06}]
   };
   var audio = null;
@@ -1475,7 +1479,17 @@
     ['.ls-swap-a-long', 'swap_a_long_per_lot', 'text'],
     ['.ls-swap-a-short', 'swap_a_short_per_lot', 'text'],
     ['.ls-swap-b-long', 'swap_b_long_per_lot', 'text'],
-    ['.ls-swap-b-short', 'swap_b_short_per_lot', 'text']
+    ['.ls-swap-b-short', 'swap_b_short_per_lot', 'text'],
+    // The arbitrage ALERT. The switch reads the running engine; the
+    // numbers are this pair's own, blank being a real state.
+    ['.ls-arb-alert', 'arb_alert', 'check'],
+    ['.ls-arb-normal', 'arb_normal', 'blank-number'],
+    ['.ls-arb-normal-pct', 'arb_normal_pct', 'blank-number'],
+    ['.ls-arb-margin', 'arb_margin', 'blank-number'],
+    ['.ls-arb-extra', 'arb_extra_cost', 'blank-number'],
+    ['.ls-arb-z', 'arb_z', 'blank-number'],
+    ['.ls-fx-hedge-cost', 'fx_hedge_cost_per_lot', 'blank-number'],
+    ['.ls-fx-hedge-lot', 'fx_hedge_lot_usd', 'blank-number']
 
   ];
 
@@ -2553,6 +2567,63 @@
     return html + '</tbody></table>';
   }
 
+  function hedgeText(arb) {
+    /* The USDINR hedge this gap needs, and whether its cost is in. */
+    if (!arb.hedge_needed) { return ''; }
+    if (arb.hedge_lots === null || arb.hedge_lots === undefined) {
+      return ' · USDINR hedge ' + DASH;
+    }
+    return ' · hedge ' + (arb.direction === 'MCX_CHEAP' ? 'sell ' : 'buy ') +
+      arb.hedge_lots + ' USDINR lots' +
+      (arb.hedge_cost === null || arb.hedge_cost === undefined
+        ? ' (NOT costed)' : ' (' + money(arb.hedge_cost) + ' in cost)');
+  }
+
+  function announceArb(events) {
+    /* Each NEW arbitrage alert once: a toast with the numbers, a sound
+     * of its own, and the banner. The first snapshot after a load only
+     * sets the mark — a reload must not replay old alerts. */
+    var newest = events.length ? events[events.length - 1].id : 0;
+    if (state.arbSeen === undefined) {
+      // A fresh page announces only what is NEWER than its first
+      // snapshot: ids are millisecond stamps, so the snapshot's own time
+      // is the mark, and a reload never replays an old alert.
+      var at = state.snapshot && state.snapshot.at
+        ? Math.floor(state.snapshot.at * 1000) : 0;
+      state.arbSeen = Math.max(newest, at);
+      return;
+    }
+    events.forEach(function (event) {
+      if (event.id <= state.arbSeen) { return; }
+      toast(event.text, 'ok');
+      sound('arb');
+      state.arbBanner = event;
+    });
+    state.arbSeen = Math.max(state.arbSeen, newest);
+    renderArbBanner();
+  }
+
+  function renderArbBanner() {
+    var event = state.arbBanner;
+    var bar = el('arb-banner');
+    if (!event) { if (bar) { bar.remove(); } return; }
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'arb-banner';
+      bar.addEventListener('click', function (e) {
+        if (e.target.closest('.dismiss')) {
+          state.arbBanner = null;
+          renderArbBanner();
+        }
+      });
+      document.body.appendChild(bar);
+    }
+    bar.innerHTML = '<span class="dismiss" title="Dismiss">&times;</span>' +
+      '<b>ARBITRAGE ALERT</b> ' +
+      new Date(event.at * 1000).toTimeString().slice(0, 8) + ' — ' +
+      escapeHtml(event.text);
+  }
+
   function renderCross(node, row) {
     /* The cross-exchange strip: the rate leg A is restated at (and how
      * old a typed rate is), leg A's own price in its own money, and both
@@ -2562,7 +2633,8 @@
     var conv = cross.conversion;
     var watch = cross.expiry || {};
     var strip = node.querySelector('.cross-strip');
-    if (!conv && !(watch.warnings || []).length && !cross.lot_match) {
+    if (!conv && !(watch.warnings || []).length && !cross.lot_match &&
+        !(row.arb && row.arb.enabled)) {
       if (strip) { strip.remove(); }
       return;
     }
@@ -2625,6 +2697,35 @@
           watch.level === 'alert' ? 'alert'
             : watch.level === 'warn' ? 'warn' : '');
     }
+    // THE ARBITRAGE WATCH, when this pair has it on.
+    var arb = row.arb;
+    if (arb && arb.enabled) {
+      var unit = arb.edge === null || arb.edge === undefined ? DASH
+        : money(arb.edge, row.currency);
+      if (arb.active) {
+        add('ARBITRAGE: MCX ' + (arb.direction === 'MCX_RICH'
+          ? 'RICH — sell B / buy A' : 'CHEAP — buy B / sell A') +
+          ' · net ' + unit + '/unit' +
+          (arb.edge_pct === null || arb.edge_pct === undefined ? ''
+            : ' (' + (arb.edge_pct >= 0 ? '+' : '') +
+              arb.edge_pct.toFixed(3) + '%)') +
+          (arb.z === null || arb.z === undefined ? ''
+            : ' · z ' + arb.z.toFixed(2)) + hedgeText(arb) + ' · alert only',
+          'arb');
+      } else {
+        add('arb watch: net ' + unit + '/unit, needs ' +
+            (arb.margin === null || arb.margin === undefined ? DASH
+              : money(arb.margin, row.currency)) +
+            (arb.z === null || arb.z === undefined ? ''
+              : ' · z ' + arb.z.toFixed(2)) +
+            hedgeText(arb) + (arb.why_not ? ' — ' + arb.why_not : ''),
+            'muted');
+      }
+    }
+    // An ARBITRAGE line goes FIRST: when it is there it is the news.
+    lines.sort(function (x, y) {
+      return (y.level === 'arb') - (x.level === 'arb');
+    });
     strip.innerHTML = lines.map(function (line) {
       return '<div class="cs-line ' + line.level + '">' +
         escapeHtml(line.text) + '</div>';
@@ -4508,6 +4609,7 @@
     fetch('/api/status').then(function (r) { return r.json(); })
       .then(function (snapshot) {
         state.snapshot = snapshot;
+        announceArb(snapshot.arb_events || []);
         state.moneyCurrency = snapshot.money_currency || 'USD';
         // The server is the authority on this. The overlay follows what
         // it says and never decides for itself - a browser that thought

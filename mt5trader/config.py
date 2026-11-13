@@ -467,7 +467,10 @@ class PairConfig:
                  commission_per_lot_b=None, slippage_allowance=None,
                  break_even_nights=None, tp_target_pct_of_margin=None,
                  carry_rate_pct=None,
-                 show_fair_window=False, algo=None, algo_window=None):
+                 show_fair_window=False, algo=None, algo_window=None,
+                 arb_alert=False, arb_normal=None, arb_normal_pct=None,
+                 arb_margin=None, arb_extra_cost=None, arb_z=None,
+                 fx_hedge_cost_per_lot=None, fx_hedge_lot_usd=None):
         self.key = key
         self.name = name or key
         self.leg_a = dict(leg_a or {})      # {'account': ..., 'symbol': ...}
@@ -593,6 +596,24 @@ class PairConfig:
         #: reason — see the `algo` property.
         self.algo_window = bool(show_fair_window if algo_window is None
                                 else algo_window)
+        #: The arbitrage ALERT (arbalert.py) — never an order. Off by
+        #: default. `arb_normal` + `arb_normal_pct` of leg B is what
+        #: this pair's gap normally is (crude ~0; MCX gold carries duty);
+        #: `arb_margin` the net edge, after costs, that must be cleared;
+        #: `arb_extra_cost` per-unit costs not in the commission (CTT,
+        #: fees); `arb_z` the sigmas from recent history (0 = off).
+        self.arb_alert = bool(arb_alert)
+        self.arb_normal = _blank_to_none(arb_normal)
+        self.arb_normal_pct = _blank_to_none(arb_normal_pct)
+        self.arb_margin = _blank_to_none(arb_margin)
+        self.arb_extra_cost = _blank_to_none(arb_extra_cost)
+        self.arb_z = _blank_to_none(arb_z)
+        #: The USDINR hedge the dollar leg needs: what one NSE USDINR
+        #: lot costs ROUND TRIP, all-in, in the pair's money (typed by
+        #: the trader), and how many dollars a lot is (blank = 1,000).
+        #: The number of lots is worked out from leg A's live notional.
+        self.fx_hedge_cost_per_lot = _blank_to_none(fx_hedge_cost_per_lot)
+        self.fx_hedge_lot_usd = _blank_to_none(fx_hedge_lot_usd)
         #: Cached MT5 metadata per leg, refreshed by the coordinator.
         self.meta_a = {}
         self.meta_b = {}
@@ -730,7 +751,10 @@ class PairConfig:
                    'clip_lots_a', 'clip_lots_b',
                    'contract_size_a', 'contract_size_b',
                    'max_quote_age_sec',
-                   'algo_window', 'show_fair_window', 'pair_type')
+                   'algo_window', 'show_fair_window', 'pair_type',
+                   'arb_alert', 'arb_normal', 'arb_normal_pct',
+                   'arb_margin', 'arb_extra_cost', 'arb_z',
+                   'fx_hedge_cost_per_lot', 'fx_hedge_lot_usd')
                   + tuple(EXIT_FIELDS))
 
     def apply_hot(self, raw):
@@ -747,6 +771,15 @@ class PairConfig:
             if field in self.EXIT_FIELDS or (
                     field.startswith('swap_') and field.endswith('_per_lot')):
                 value = _blank_to_none(value)
+            elif field == 'arb_alert':
+                value = bool(value)
+            elif field.startswith('arb_') or field.startswith('fx_hedge_'):
+                value = _blank_to_none(value)
+                if value is not None:
+                    try:
+                        value = float(value)
+                    except (TypeError, ValueError):
+                        continue
             elif field in ('auto_route', 'algo_window', 'show_fair_window'):
                 field = 'algo_window' if field == 'show_fair_window' else field
                 value = bool(value)
@@ -818,6 +851,12 @@ class PairConfig:
             'tp_target_pct_of_margin': self.tp_target_pct_of_margin,
             'carry_rate_pct': self.carry_rate_pct,
             'algo': self.algo, 'algo_window': self.algo_window,
+            'arb_alert': self.arb_alert, 'arb_normal': self.arb_normal,
+            'arb_normal_pct': self.arb_normal_pct,
+            'arb_margin': self.arb_margin,
+            'arb_extra_cost': self.arb_extra_cost, 'arb_z': self.arb_z,
+            'fx_hedge_cost_per_lot': self.fx_hedge_cost_per_lot,
+            'fx_hedge_lot_usd': self.fx_hedge_lot_usd,
         }
 
     @classmethod

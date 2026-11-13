@@ -34,6 +34,9 @@ from .reconcile import Reconciler
 from .session import SessionClock, day_orders, overnight_action
 from . import contracts
 from .history import SpreadHistory
+from . import arbalert, costs
+from .arbalert import ArbWatch
+from .notify import TelegramNotifier
 from .spread import (LevelSigma, QuoteAgeTracker, SpreadJumpTracker,
                      compute_spread, stale_quote)
 
@@ -102,6 +105,9 @@ class Coordinator:
         #: picture only: nothing here reads it to decide anything.
         self.history = SpreadHistory()
         self._history_written = 0.0
+        #: The arbitrage ALERT — it reads, it never orders.
+        self.arb = ArbWatch(clock=self.clock)
+        self.notifier = TelegramNotifier()
         self.market = {}                    # pair key -> snapshot
         self.session = {}                   # pair key -> O/H/L/V of OUR series
         self._account_cache = {}            # account -> (at, info)
@@ -540,6 +546,7 @@ class Coordinator:
                 # watches what is already at the broker.
                 self.market[key] = None
                 self.history.observe(key, None)       # a gap, not a zero
+                self.arb.evaluate(pair, None)
                 self._go_dark(key, pair, tick_a, tick_b)
                 continue
             self._dark.pop(key, None)
@@ -589,6 +596,7 @@ class Coordinator:
             self._observe_session(key, md, pair)
             self.market[key] = md
             self.history.observe(key, md)
+            self._watch_arb(key, pair, md)
             # LIMIT-mode orders are worked on the SAME pass that priced
             # them: a peg re-priced off a snapshot older than the one on
             # screen is a peg holding a level nobody is showing.
@@ -674,6 +682,53 @@ class Coordinator:
         if fx and len(str(fx)) == 6:
             return str(fx).upper()[3:]
         return (pair.meta_b or {}).get('currency') or None
+
+    def _watch_arb(self, key, pair, md):
+        """The arbitrage alert for one pair. Reads only; never orders."""
+        if not pair.arb_alert:
+            self.arb.evaluate(pair, md)
+            return
+        detail = self.arb_costs(pair, md)
+        status, event = self.arb.evaluate(
+            pair, md, self.config.settings,
+            self.history.tail(key, arbalert.Z_WINDOW),
+            detail['per_unit'], detail)
+        md['arb'] = status
+        if event is not None:
+            logging.warning("ARBITRAGE ALERT — %s", event['text'])
+            self.notifier.send('⚠ ' + event['text'])
+
+    def arb_costs_per_unit(self, pair, md):
+        return self.arb_costs(pair, md)['per_unit']
+
+    def arb_costs(self, pair, md):
+        """What taking the gap costs, per unit of spread, beyond the
+        price it is entered at, and where each part comes from:
+
+        commission     both legs, both ends (the ladder's per-lot boxes)
+        exit crossing  half of both books' width — the entry already
+                       paid its side in the executable price
+        USDINR hedge   the dollar leg's notional in NSE USDINR lots
+                       (e.g. $88,400 = 88 lots of $1,000), times the
+                       trader's own round-trip cost per lot
+
+        Each in the pair's money per 1.00 of spread: divided by k.
+        """
+        settings = pair.exit_settings(self.config.settings)
+        meta_a, meta_b = pair.meta_a or {}, pair.meta_b or {}
+        k = sizing.spread_units(pair.clip_lots_b, meta_b.get('contract_size'))
+        fees = costs.mark_fees(pair.clip_lots_a, pair.clip_lots_b, settings)
+        exit_crossing = ((md or {}).get('spread_cost') or 0.0) / 2.0
+        hedge = arbalert.fx_hedge(pair, md, meta_a)
+        per_unit = ((fees / k if k else 0.0) + exit_crossing
+                    + ((hedge['cost'] or 0.0) / k if k else 0.0))
+        return {'per_unit': per_unit,
+                'commission': fees / k if k else None,
+                'exit_crossing': exit_crossing,
+                'hedge': hedge,
+                'hedge_per_unit': ((hedge['cost'] / k)
+                                   if (k and hedge['cost'] is not None)
+                                   else None)}
 
     def cross_exchange(self, pair, md):
         """What makes a cross-exchange pair checkable by eye.
@@ -2153,6 +2208,9 @@ class Coordinator:
                 # The cross-exchange facts: the rate, how leg A is
                 # restated, how the two lots compare, and both expiries.
                 'cross': self.cross_exchange(pair, md),
+                # The arbitrage alert: on or off, and its latest reading.
+                'arb_alert': pair.arb_alert,
+                'arb': self.arb.status.get(key),
                 # The currency every money figure on THIS ladder is in:
                 # leg B's, which is where k = L_B x C_B puts it — rupees
                 # for an MCX leg, whatever leg A trades in.
@@ -2346,6 +2404,9 @@ class Coordinator:
             'hedge_times_ms': list(self.quoter.hedge_times[-50:]),
             'click_to_on_ms': list(self.executor.timings[-50:]),
             'pairs': pairs,
+            # The latest arbitrage alerts, newest last — each says what
+            # the edge was and that nothing was sent.
+            'arb_events': list(self.arb.events[-20:]),
             # One currency when every ladder shares it, so a panel that
             # totals across pairs can label its sum; None when they mix.
             'money_currency': _common({p.get('currency')
