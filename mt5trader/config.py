@@ -334,30 +334,90 @@ STRUCTURAL_SETTINGS = ('POLL_INTERVAL_SEC',)
 
 
 class AccountConfig:
-    """One MT5 account = one login, one terminal, one port.
+    """One account = one login, one leg runner, one port.
 
-    Two accounts pointing at the same terminal folder are ONE account
-    whatever the config says — a terminal holds a single login.
+    `kind` says which broker the runner talks to:
+
+      mt5    a MetaTrader 5 terminal (the CME / COMEX / NYMEX leg, or a
+             CFD) — login, server, terminal path, password in .env
+      arrow  an Arrow login on an Indian exchange (the MCX leg) — app
+             id and user id here; the password, API secret and TOTP
+             SEED live in .env under the names held here, never in
+             this file
+
+    Two MT5 accounts pointing at the same terminal folder are ONE
+    account whatever the config says — a terminal holds a single login.
     """
 
     def __init__(self, name, terminal_path=None, login=None,
-                 password_env="", server=None, endpoint=None):
+                 password_env="", server=None, endpoint=None, kind='mt5',
+                 app_id=None, user_id=None, api_secret_env="",
+                 totp_secret_env="", exchange=None, product=None,
+                 quantity_in_lots=False, max_lots=None, price_divisor=None):
         self.name = name
+        self.kind = (str(kind or 'mt5').strip().lower())
+        if self.kind not in ACCOUNT_KINDS:
+            _warn_once("account '%s': unknown kind %r — treating it as mt5",
+                       name, kind)
+            self.kind = 'mt5'
         self.terminal_path = terminal_path
-        self.login = int(login) if login else None
-        self.password_env = password_env or env_key_for(name)
+        try:
+            self.login = int(login) if login else None
+        except (TypeError, ValueError):
+            self.login = None
+        self.password_env = password_env or (
+            arrow_env_key(name, 'PASSWORD') if self.kind == 'arrow'
+            else env_key_for(name))
         self.server = server
         #: host:port where this account's leg runner listens.
         self.endpoint = endpoint
+        # --- Arrow ---
+        self.app_id = app_id
+        self.user_id = user_id
+        self.api_secret_env = api_secret_env or (
+            arrow_env_key(name, 'API_SECRET') if self.kind == 'arrow' else '')
+        self.totp_secret_env = totp_secret_env or (
+            arrow_env_key(name, 'TOTP_SECRET') if self.kind == 'arrow' else '')
+        self.exchange = (exchange or ('MCX' if self.kind == 'arrow' else None))
+        self.product = product or ('NRML' if self.kind == 'arrow' else None)
+        #: Some Indian brokers take an MCX `quantity` in LOTS rather than
+        #: units. Arrow takes units (lots x lot size); flip this only if a
+        #: one-lot test order proves otherwise.
+        self.quantity_in_lots = bool(quantity_in_lots)
+        self.max_lots = _blank_to_none(max_lots)
+        self.price_divisor = _blank_to_none(price_divisor)
 
     @property
     def password(self):
         return os.environ.get(self.password_env) if self.password_env else None
 
+    @property
+    def api_secret(self):
+        return (os.environ.get(self.api_secret_env)
+                if self.api_secret_env else None)
+
+    @property
+    def totp_secret(self):
+        return (os.environ.get(self.totp_secret_env)
+                if self.totp_secret_env else None)
+
+    @property
+    def is_arrow(self):
+        return self.kind == 'arrow'
+
     def to_dict(self):
-        return {'terminal_path': self.terminal_path, 'login': self.login,
-                'password_env': self.password_env, 'server': self.server,
-                'endpoint': self.endpoint}
+        out = {'kind': self.kind, 'terminal_path': self.terminal_path,
+               'login': self.login, 'password_env': self.password_env,
+               'server': self.server, 'endpoint': self.endpoint}
+        if self.kind == 'arrow':
+            out.update({'app_id': self.app_id, 'user_id': self.user_id,
+                        'api_secret_env': self.api_secret_env,
+                        'totp_secret_env': self.totp_secret_env,
+                        'exchange': self.exchange, 'product': self.product,
+                        'quantity_in_lots': self.quantity_in_lots,
+                        'max_lots': self.max_lots,
+                        'price_divisor': self.price_divisor})
+        return out
 
     @classmethod
     def from_dict(cls, name, raw):
@@ -365,7 +425,19 @@ class AccountConfig:
         return cls(name, terminal_path=raw.get('terminal_path'),
                    login=raw.get('login'),
                    password_env=raw.get('password_env'),
-                   server=raw.get('server'), endpoint=raw.get('endpoint'))
+                   server=raw.get('server'), endpoint=raw.get('endpoint'),
+                   kind=raw.get('kind') or 'mt5',
+                   app_id=raw.get('app_id'), user_id=raw.get('user_id'),
+                   api_secret_env=raw.get('api_secret_env'),
+                   totp_secret_env=raw.get('totp_secret_env'),
+                   exchange=raw.get('exchange'), product=raw.get('product'),
+                   quantity_in_lots=raw.get('quantity_in_lots'),
+                   max_lots=raw.get('max_lots'),
+                   price_divisor=raw.get('price_divisor'))
+
+
+#: The brokers a leg runner can talk to.
+ACCOUNT_KINDS = ('mt5', 'arrow')
 
 
 class PairConfig:
@@ -785,7 +857,12 @@ class PairConfig:
 class TraderConfig:
     """Everything the engine reads, and where it came from."""
 
-    def __init__(self, accounts=None, pairs=None, settings=None, path=None):
+    def __init__(self, accounts=None, pairs=None, settings=None, path=None,
+                 fx=None):
+        #: The exchange rates cross-currency pairs convert through —
+        #: see fx.py. Hot: a new USDINR changes the spread, not which
+        #: instruments are traded, so it never restarts the engine.
+        self.fx = dict(fx or {})
         self.accounts = dict(accounts or {})
         self.pairs = dict(pairs or {})
         self.settings = dict(DEFAULT_SETTINGS)
@@ -805,7 +882,8 @@ class TraderConfig:
                     for name, acct in (raw.get('accounts') or {}).items()}
         pairs = {key: PairConfig.from_dict(key, pair)
                  for key, pair in (raw.get('pairs') or {}).items()}
-        return cls(accounts, pairs, raw.get('settings'), path)
+        return cls(accounts, pairs, raw.get('settings'), path,
+                   fx=raw.get('fx'))
 
     @classmethod
     def from_file(cls, path):
@@ -819,6 +897,7 @@ class TraderConfig:
             'accounts': {n: a.to_dict() for n, a in self.accounts.items()},
             'pairs': {k: p.to_dict() for k, p in self.pairs.items()},
             'settings': dict(self.settings),
+            'fx': dict(self.fx),
         }
 
     def restart_required(self, fresh):
@@ -999,6 +1078,14 @@ def env_key_for(account_name):
     slug = _ENV_SAFE.sub('_', (account_name or '').upper().strip())
     slug = re.sub(r'_+', '_', slug).strip('_') or 'ACCOUNT'
     return f'MT5_PASSWORD_{slug}'
+
+
+def arrow_env_key(account_name, what):
+    """The .env key for one of an Arrow account's secrets:
+    ARROW_PASSWORD_<ACCOUNT>, ARROW_API_SECRET_<ACCOUNT>,
+    ARROW_TOTP_SECRET_<ACCOUNT>. Same sanitising as `env_key_for`."""
+    slug = env_key_for(account_name)[len('MT5_PASSWORD_'):]
+    return f'ARROW_{what}_{slug}'
 
 
 def env_line(key, value):

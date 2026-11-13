@@ -1,6 +1,9 @@
 # MetaTrader5 is Windows-only and is needed only on the trading box.
 # Everything else — and the whole test suite — runs anywhere.
 MetaTrader5>=5.0.45 ; sys_platform == "win32"
+# Arrow (the MCX leg) — needed only on the machine running the Arrow leg
+# runner, which must be the static IP registered with Arrow. Tests fake it.
+pyarrow-client>=1.4.0 ; extra == "arrow"
 python-dotenv>=1.0.0
 Flask>=3.0.0
 

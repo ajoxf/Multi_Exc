@@ -92,7 +92,8 @@ def engine_fingerprint(config_path):
     accounts = {
         name: {key: (account or {}).get(key)
                for key in ('endpoint', 'login', 'server', 'terminal_path',
-                           'password_env')}
+                           'password_env', 'kind', 'app_id', 'user_id',
+                           'exchange', 'product', 'quantity_in_lots')}
         for name, account in (raw.get('accounts') or {}).items()}
     pairs = {
         key: {field: (pair or {}).get(field)

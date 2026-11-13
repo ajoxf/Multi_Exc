@@ -32,6 +32,7 @@ from .models import (MAGIC_NUMBER, LegFill, OrderType, SpreadPosition,
 from .quoter import Quoter, quoting_leg
 from .reconcile import Reconciler
 from .session import SessionClock, day_orders, overnight_action
+from . import contracts
 from .spread import (LevelSigma, QuoteAgeTracker, SpreadJumpTracker,
                      compute_spread, stale_quote)
 
@@ -548,10 +549,24 @@ class Coordinator:
                 self._log_stale(key, pair, md)
                 self._auto_refresh(key, md)
             md['jump_reason'] = jumped
-            md['guard_reason'] = stale or jumped
+            # The EXCHANGE RATE is part of the price on a cross-currency
+            # pair. A stale or unconfirmed USDINR withholds ORDERS, the
+            # same as a stale leg — never a close, which goes in the
+            # brokers' own units whatever the rate.
+            fx_reason = tick_a.get('fx_reason') or tick_b.get('fx_reason')
+            md['fx_reason'] = fx_reason
+            for leg, tick in (('a', tick_a), ('b', tick_b)):
+                if tick.get('conversion'):
+                    md[f'leg_{leg}_fx_rate'] = tick.get('fx_rate')
+                    md[f'leg_{leg}_multiplier'] = tick.get('multiplier')
+                    md[f'leg_{leg}_raw_bid'] = tick.get('raw_bid')
+                    md[f'leg_{leg}_raw_ask'] = tick.get('raw_ask')
+            md['guard_reason'] = stale or jumped or fx_reason
             # The badge the ladder shows continuously, so a trader can
             # see what they are clicking into (spec §8).
-            md['feed_badge'] = _badge(md, stale, jumped)
+            md['feed_badge'] = ('FX stale' if (fx_reason and not
+                                               (stale or jumped))
+                                else _badge(md, stale, jumped))
             self._observe_session(key, md, pair)
             self.market[key] = md
             # LIMIT-mode orders are worked on the SAME pass that priced
@@ -630,6 +645,51 @@ class Coordinator:
                            if alive else
                            'neither leg answered — check the terminals'),
                 'ticks': got}
+
+    def cross_exchange(self, pair, md):
+        """What makes a cross-exchange pair checkable by eye.
+
+        Leg A's conversion (FX x unit factor, and the rate's age), the
+        two lots compared in the commodity itself, and both legs'
+        expiries with what is wrong with them. Every figure that could
+        not be measured is None — the panel draws an em dash.
+        """
+        fx_name = pair.leg_a.get('fx')
+        factor = pair.leg_a.get('price_factor')
+        book = getattr(self, 'fxbook', None)
+        fx = book.status(fx_name) if (book and fx_name) else None
+        spec_a = contracts.spec_for(pair.symbol_a)
+        spec_b = contracts.spec_for(pair.symbol_b, 'MCX')
+        match = contracts.lot_match(spec_a, spec_b, pair.clip_lots_a,
+                                    pair.clip_lots_b) \
+            if (spec_a and spec_b) else None
+        watch = contracts.expiry_watch(
+            pair.expiry_a or (pair.meta_a or {}).get('expiry'),
+            pair.expiry or (pair.meta_b or {}).get('expiry'),
+            warn_days=float(self.config.get('EXPIRY_WARN_DAYS', 5.0)),
+            gap_days=float(self.config.get('EXPIRY_GAP_DAYS', 3.0)),
+            now=self.clock())
+        if not fx_name and not factor and not spec_b:
+            converted = None
+        else:
+            converted = {
+                'fx': fx_name, 'price_factor': factor,
+                'fx_rate': (fx or {}).get('rate'),
+                'fx_source': (fx or {}).get('source'),
+                'fx_age_sec': (fx or {}).get('age_sec'),
+                'fx_stale': (fx or {}).get('stale'),
+                'multiplier': (md or {}).get('leg_a_multiplier'),
+                'raw_bid_a': (md or {}).get('leg_a_raw_bid'),
+                'raw_ask_a': (md or {}).get('leg_a_raw_ask'),
+                'formula': (f"A' = A x {fx_name or '1'} x {factor or 1:g}"),
+            }
+        return {
+            'conversion': converted,
+            'spec_a': spec_a.to_dict() if spec_a else None,
+            'spec_b': spec_b.to_dict() if spec_b else None,
+            'lot_match': match,
+            'expiry': watch,
+        }
 
     def margin_per_spread(self, pair):
         """What ONE spread ties up, in money, across BOTH accounts.
@@ -1924,7 +1984,10 @@ class Coordinator:
         # position makes ours unknown; neither is a difference of zero.
         theirs = 0.0
         for info in fresh:
-            profit = (info or {}).get('profit')
+            # Like with like: a dollar account's floating P&L restated
+            # in the pairs' currency where the conversion layer could.
+            profit = (info or {}).get('profit_converted',
+                                      (info or {}).get('profit'))
             if info is None or not isinstance(profit, (int, float)):
                 theirs = None
                 break
@@ -2049,6 +2112,9 @@ class Coordinator:
                     ours_gross += open_gross
             pairs[key] = {
                 'key': key, 'name': pair.name, 'enabled': pair.enabled,
+                # The cross-exchange facts: the rate, how leg A is
+                # restated, how the two lots compare, and both expiries.
+                'cross': self.cross_exchange(pair, md),
                 'account_a': pair.account_a, 'account_b': pair.account_b,
                 'symbol_a': pair.symbol_a, 'symbol_b': pair.symbol_b,
                 # What KIND of pair this is — the operator's own

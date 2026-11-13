@@ -1,4 +1,4 @@
-# Working on MT5-Trader
+# Working on Multi_Exc (MT5-Trader across two exchanges)
 
 The build specification is held privately, outside this repository — get
 it from the repository owner and read it first. Most of it is a rule that
@@ -40,6 +40,24 @@ from.
 - A refusal carries the broker's own words (`10027 AutoTrading disabled
   by client`), never "check the log".
 - `mt5trader/broker.py` is the only module allowed to import
-  MetaTrader5.
+  MetaTrader5, and `mt5trader/arrow_broker.py` the only one allowed to
+  import pyarrow_client. Both offer the SAME methods; nothing above the
+  leg runner may know which it is talking to.
 - Every test that asserts a guard withholds something needs a
   **control** that turns the guard off and asserts the opposite.
+
+## Cross-exchange rules
+
+- **Leg A is restated in leg B's money and unit** by `convert.py`
+  (`A' = A x FX x unit factor`) BELOW the engine. Do not add currency
+  logic to the coordinator, executor or quoter — convert at the leg.
+- **An unknown FX rate is no price**, never a rate of 1. A stale typed
+  rate withholds ORDERS (it is part of the guard reason); it never
+  withholds a close.
+- **Arrow is netting.** The ledger (`data/arrow-*.ledger.json`) is
+  written BEFORE an order is sent; its order ids are the tickets.
+  Positions are cross-checked against Arrow's net: volume Arrow does not
+  hold is withheld from the report, volume the ledger cannot explain is
+  never claimed.
+- **Contract sizes come from the brokers**; `contracts.py` is the
+  cross-check Diagnose names disagreements against, never the source.

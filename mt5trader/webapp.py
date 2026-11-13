@@ -26,10 +26,12 @@ from datetime import date
 
 from flask import Flask, jsonify, render_template, request
 
-from . import atomicfile, config as cfg, diagnostics, fairvalue, \
-    hedgeratio, sizing, slippage
+from . import atomicfile, config as cfg, contracts, diagnostics, \
+    fairvalue, hedgeratio, sizing, slippage
 from .commands import CommandLog
 from .legs import RemoteLeg
+from .convert import Conversion, ConvertedLeg, conversions_from_config
+from .fx import FxBook, manual_entry, parse_pair
 
 #: How old the status file may be before the UI says the engine is not
 #: running. Six polls at the default 0.3s: long enough not to flicker,
@@ -488,16 +490,23 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         accounts = []
         for name, account in (raw.get('accounts') or {}).items():
             account = account or {}
+            kind = account.get('kind') or 'mt5'
+            arrow = cfg.AccountConfig.from_dict(name, account)
             accounts.append({
                 'name': name,
+                'kind': kind,
+                'app_id': account.get('app_id'),
+                'user_id': account.get('user_id'),
+                'exchange': arrow.exchange,
+                # Whether each secret is SET — never the secret.
+                'api_secret_set': bool(arrow.api_secret),
+                'totp_secret_set': bool(arrow.totp_secret),
                 'endpoint': account.get('endpoint'),
                 'login': account.get('login'),
                 'server': account.get('server'),
                 'terminal_path': account.get('terminal_path'),
-                'password_env': account.get('password_env')
-                or cfg.env_key_for(name),
-                'password_set': bool(os.environ.get(
-                    account.get('password_env') or cfg.env_key_for(name))),
+                'password_env': arrow.password_env,
+                'password_set': bool(os.environ.get(arrow.password_env)),
                 # Shown ON the row: a clash was only discoverable by
                 # running a connectivity check, so an operator could look
                 # straight at two rows holding one terminal and see
@@ -552,22 +561,53 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
             if clash:
                 return jsonify({'ok': False, 'error': clash}), 400
 
+        kind = str(payload.get('kind') or account.get('kind')
+                   or 'mt5').lower()
+        if kind not in cfg.ACCOUNT_KINDS:
+            return jsonify({'ok': False, 'error': (
+                f'kind must be one of {", ".join(cfg.ACCOUNT_KINDS)}')}), 400
+        if kind == 'mt5':
+            try:
+                login = int(login) if login else account.get('login')
+            except (TypeError, ValueError):
+                return jsonify({'ok': False, 'error': (
+                    f'the MT5 login must be a number, not {login!r}')}), 400
         account.update({
+            'kind': kind,
             'endpoint': endpoint or account.get('endpoint'),
             'terminal_path': path or account.get('terminal_path'),
-            'login': int(login) if login else account.get('login'),
+            'login': login if kind == 'mt5' else None,
             'server': payload.get('server') or account.get('server'),
-            'password_env': account.get('password_env')
-            or cfg.env_key_for(name),
         })
+        if kind == 'arrow':
+            for field in ('app_id', 'user_id', 'exchange', 'product',
+                          'max_lots', 'price_divisor', 'quantity_in_lots'):
+                if field in payload and payload[field] not in (None, ''):
+                    account[field] = payload[field]
+        # Fill in the secret KEY NAMES this kind uses (never the values).
+        defaults = cfg.AccountConfig.from_dict(name, dict(
+            account, password_env=None, api_secret_env=None,
+            totp_secret_env=None))
+        account['password_env'] = (account.get('password_env')
+                                   if account.get('password_env')
+                                   and (kind == 'mt5') ==
+                                   account['password_env'].startswith('MT5_')
+                                   else defaults.password_env)
+        if kind == 'arrow':
+            account.setdefault('api_secret_env', defaults.api_secret_env)
+            account.setdefault('totp_secret_env', defaults.totp_secret_env)
         cfg.save_raw(config_path, raw)
 
-        password = payload.get('password')
-        if password:
-            # Into .env, quoted, and NEVER into the config or a log line.
-            env_path = os.path.join(os.path.dirname(
-                os.path.abspath(config_path)) or '.', '.env')
-            cfg.write_env_value(env_path, account['password_env'], password)
+        # Into .env, quoted, and NEVER into the config or a log line.
+        env_path = os.path.join(os.path.dirname(
+            os.path.abspath(config_path)) or '.', '.env')
+        for field, key in (('password', account['password_env']),
+                           ('api_secret', account.get('api_secret_env')),
+                           ('totp_secret', account.get('totp_secret_env'))):
+            secret = payload.get(field)
+            if secret and key:
+                cfg.write_env_value(env_path, key, secret)
+                os.environ[key] = secret
         return jsonify({'ok': True, 'account': name,
                         'restart_required': True,
                         'note': 'accounts are structural — restart the '
@@ -608,7 +648,9 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
         """What the config says this account IS, for comparison with
         whatever terminal the runner actually reached."""
         raw = cfg.load_raw(config_path)
-        return ((raw.get('accounts') or {}).get(name) or {}).get('login')
+        row = (raw.get('accounts') or {}).get(name) or {}
+        # An Arrow account is named by its user id, not an MT5 login.
+        return row.get('login') or row.get('user_id')
 
     @app.get('/api/accounts/<path:name>/connect')
     def api_connect_account(name):
@@ -842,7 +884,7 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                             'report': report}), 404
         return jsonify({'ok': True, 'report': report})
 
-    def open_leg(name):
+    def open_leg(name, wrap=True):
         """A short-lived RemoteLeg to one account, or why there is none.
 
         (leg, error, status) — the caller closes it. This is the path
@@ -860,7 +902,29 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                           f"{account['endpoint']} — start it with: python "
                           f"run_leg.py --config config.json --account "
                           f"{name}"), 503
-        return leg, None, 200
+        return (converted(name, leg, raw) if wrap else leg), None, 200
+
+    def converted(name, leg, raw):
+        """The same leg the ENGINE sees: a dollar leg priced in the
+        pair's currency and unit. Without this the Exchanges page would
+        derive beta and the increment from dollars and the ladder would
+        trade them in rupees."""
+        config = cfg.TraderConfig.from_raw(raw, path=config_path)
+        convs, _clashes = conversions_from_config(config)
+        if not convs.get(name):
+            return leg
+
+        def leg_for(account):
+            if account == name:
+                return leg
+            other = (raw.get('accounts') or {}).get(account) or {}
+            if not other.get('endpoint'):
+                return None
+            raw_leg = RemoteLeg(account, other['endpoint'], timeout=5.0)
+            return raw_leg if raw_leg.connect(retries=1, delay=0.0) else None
+
+        return ConvertedLeg(leg, convs[name],
+                            FxBook(raw=config.fx, leg_for=leg_for))
 
     @app.delete('/api/accounts/<path:name>')
     def api_delete_account(name):
@@ -888,6 +952,67 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                                 'it there'})
 
     # -- pairs --------------------------------------------------------------
+
+    @app.get('/api/fx')
+    def api_fx():
+        """Every configured exchange rate, its source, its age, and
+        whether it is fit to price an order."""
+        raw = cfg.load_raw(config_path)
+        book = FxBook(raw=raw.get('fx'))
+        rates = {name: book.status(name) for name in book.names()}
+        # A pair that converts through a rate nobody has set is listed
+        # too, so the missing rate is on the screen and not only in a
+        # dark ladder.
+        for row in (raw.get('pairs') or {}).values():
+            for side in ('leg_a', 'leg_b'):
+                fx = ((row or {}).get(side) or {}).get('fx')
+                if fx and fx.upper() not in rates:
+                    rates[fx.upper()] = book.status(fx)
+        return jsonify({'ok': True, 'rates': rates})
+
+    @app.post('/api/fx/<name>')
+    def api_save_fx(name):
+        """Set one rate. Manual: `{"rate": 84.25}` — stamped now, which
+        is what makes its age honest. Live: `{"source": "symbol",
+        "account": ..., "symbol": ..., "invert": false}`.
+
+        Hot: it changes the spread, not the instruments, so the engine
+        picks it up on its next read without a restart.
+        """
+        name = str(name or '').upper().replace('/', '')
+        if parse_pair(name) is None:
+            return jsonify({'ok': False, 'error': (
+                f'{name!r} is not an FX pair — write it as USDINR')}), 400
+        payload = request.get_json(silent=True) or {}
+        raw = cfg.load_raw(config_path)
+        fx = raw.setdefault('fx', {})
+        if (payload.get('source') or 'manual') == 'symbol':
+            account, symbol = payload.get('account'), payload.get('symbol')
+            if account not in (raw.get('accounts') or {}) or not symbol:
+                return jsonify({'ok': False, 'error': (
+                    'a live rate needs an account that exists and a '
+                    'symbol on it')}), 400
+            fx[name] = {'source': 'symbol', 'account': account,
+                        'symbol': symbol,
+                        'invert': bool(payload.get('invert'))}
+        else:
+            try:
+                rate = float(payload.get('rate'))
+            except (TypeError, ValueError):
+                rate = 0.0
+            if not rate > 0:
+                return jsonify({'ok': False, 'error': (
+                    f'{name} must be a positive number')}), 400
+            previous = (fx.get(name) or {}).get('rate')
+            entry = manual_entry(rate, max_age_hours=payload.get(
+                'max_age_hours', (fx.get(name) or {}).get('max_age_hours')))
+            fx[name] = entry
+            logging.info('FX %s set by hand to %g (was %s)', name, rate,
+                         previous)
+        cfg.save_raw(config_path, raw)
+        return jsonify({'ok': True, 'name': name,
+                        'status': FxBook(raw=fx).status(name),
+                        'restart_required': False})
 
     @app.get('/api/pairs')
     def api_pairs():
@@ -917,9 +1042,18 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                 return jsonify({'ok': False,
                                 'error': f'leg {side.upper()} needs an '
                                          f'account and a symbol'}), 400
-            leg, error, code = open_leg(name)
+            leg, error, code = open_leg(name, wrap=False)
             if leg is None:
                 return jsonify({'ok': False, 'error': error}), code
+            # Converted by the pair AS EDITED, not as saved: the FX and
+            # unit factor being typed are exactly what is being checked.
+            if leg_cfg.get('fx') or leg_cfg.get('price_factor'):
+                leg = ConvertedLeg(
+                    leg, {symbol: Conversion(symbol, leg_cfg.get('fx'),
+                                             leg_cfg.get('price_factor'))},
+                    FxBook(raw=raw.get('fx'),
+                           leg_for=lambda account, _n=name, _l=leg:
+                           _l if account == _n else None))
             legs[side] = leg
             try:
                 specs[side] = leg.symbol_report(symbol)
@@ -977,6 +1111,19 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                 'Default is the wider bid-ask — that is the spread you earn '
                 'by quoting. It is usually also the less liquid leg, where '
                 'you queue longest and fill least.'),
+            # Cross-exchange: how leg A should be restated, how the two
+            # lots compare in the commodity, and both expiries.
+            'conversion_suggestion': contracts.suggest_conversion(
+                (pair.get('leg_a') or {}).get('symbol'),
+                (pair.get('leg_b') or {}).get('symbol')),
+            'conversion': specs['a'].get('conversion'),
+            'lot_match': contracts.lot_match(
+                contracts.spec_for((pair.get('leg_a') or {}).get('symbol')),
+                contracts.spec_for((pair.get('leg_b') or {}).get('symbol'),
+                                   'MCX'), clip_a, clip_b),
+            'expiry_watch': contracts.expiry_watch(
+                pair.get('expiry_a') or specs['a'].get('expiry'),
+                pair.get('expiry') or specs['b'].get('expiry')),
         })
 
     @app.post('/api/pairs/<path:key>')
@@ -1038,7 +1185,42 @@ def create_app(status_path='status.json', command_path='commands.jsonl',
                       'carry_rate_pct',
                       'show_fair_window', 'algo', 'algo_window'):
             if field in payload:
-                pair[field] = payload[field]
+                if field in ('leg_a', 'leg_b') and isinstance(
+                        payload[field], dict):
+                    # MERGED, not replaced: a form that only knows the
+                    # account and symbol must not wipe the FX and unit
+                    # factor it never showed.
+                    merged = dict(pair.get(field) or {})
+                    merged.update(payload[field])
+                    for k in ('fx', 'price_factor'):
+                        if merged.get(k) in ('', None):
+                            merged.pop(k, None)
+                    pair[field] = merged
+                else:
+                    pair[field] = payload[field]
+        for side in ('leg_a', 'leg_b'):
+            leg = pair.get(side) or {}
+            if leg.get('fx') is not None:
+                leg['fx'] = str(leg['fx']).upper().replace('/', '')
+                if parse_pair(leg['fx']) is None:
+                    return jsonify({'ok': False, 'error': (
+                        f"{side}: {leg['fx']!r} is not an FX pair — write "
+                        f"it as USDINR")}), 400
+            if leg.get('price_factor') is not None:
+                try:
+                    leg['price_factor'] = float(leg['price_factor'])
+                except (TypeError, ValueError):
+                    leg['price_factor'] = -1
+                if not leg['price_factor'] > 0:
+                    return jsonify({'ok': False, 'error': (
+                        f"{side}: the unit factor must be a positive "
+                        f"number (USD/oz -> INR/10g is 0.3215)")}), 400
+        _conv, clashes = conversions_from_config(
+            cfg.TraderConfig.from_raw(raw, path=config_path))
+        if clashes:
+            return jsonify({'ok': False, 'error': (
+                clashes[0] + ' — one quote cannot carry two prices. Use the '
+                'same FX and unit factor, or a different symbol')}), 400
         # A date that will not parse is REPORTED and the old value kept:
         # silently dropping it leaves the operator looking at a blank
         # field with no way to tell whether it was rejected or ignored.

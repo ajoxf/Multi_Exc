@@ -1,4 +1,4 @@
-"""Leg runner: one process per MT5 account.
+"""Leg runner: one process per account (MT5 terminal or Arrow login).
 
 The MetaTrader5 Python package holds ONE global connection per process
 and a second `mt5.initialize()` silently replaces the first, so two
@@ -179,6 +179,19 @@ class LegServer:
             pass
 
 
+def make_session(account, config=None):
+    """The broker session this account's `kind` names. Both offer the
+    same methods; nothing above the leg runner can tell them apart."""
+    if getattr(account, 'kind', 'mt5') == 'arrow':
+        from .arrow_broker import ArrowSession
+        base = os.path.dirname(os.path.abspath(
+            getattr(config, 'path', None) or 'config.json'))
+        safe = re.sub(r'[^A-Za-z0-9_.-]', '_', str(account.name))
+        return ArrowSession(account, ledger_path=os.path.join(
+            base, 'data', f'arrow-{safe}.ledger.json'))
+    return BrokerSession(account)
+
+
 def main():
     parser = argparse.ArgumentParser(description="MT5 leg runner (one per account)")
     parser.add_argument('--config', required=True, help='Path to config JSON')
@@ -219,10 +232,14 @@ def main():
               "the launcher.")
         sys.exit(1)
 
-    broker = BrokerSession(account)
+    broker = make_session(account, config)
     if not broker.initialize():
-        print(f"Failed to connect account '{args.account}' to MT5 — "
-              f"check terminal_path/login/server/.env")
+        if getattr(account, 'kind', 'mt5') == 'arrow':
+            print(f"Failed to connect account '{args.account}' to Arrow: "
+                  f"{getattr(broker, 'last_error', None) or 'see the log'}")
+        else:
+            print(f"Failed to connect account '{args.account}' to MT5 — "
+                  f"check terminal_path/login/server/.env")
         sys.exit(1)
 
     try:

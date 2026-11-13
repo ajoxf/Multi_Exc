@@ -1,12 +1,131 @@
-# MT5-Trader
+# Multi_Exc — the MT5-Trader ladder, across two exchanges
 
-A **spread price-ladder trading terminal for MetaTrader 5** — a manual tool. No
-strategy, no signals, no automatic entries or exits. A human looks at a ladder
-of spread prices, clicks a price, and an order exists at that price.
+The same spread price-ladder terminal as **Mirror-MT5-Trader** — the same
+ladder, Market Grid, positions monitor, Exchanges page, guards, journal,
+slippage report and restart recovery, unchanged — with one difference:
+**Leg A trades on an MT5 terminal (CME / NYMEX / COMEX) and Leg B trades on
+MCX through Arrow**, the broker behind arrow-statarb.
 
-Each ladder trades one pair of instruments across **two MT5 accounts** (Leg A on
-account 1, Leg B on account 2) and displays the spread between them as a single
-instrument, the way a CQG or TT inter-product ladder does.
+It is built for watching and trading spreads like these:
+
+| Ladder | Leg A (MT5, USD) | Leg B (Arrow, INR) | Leg A restated as |
+|---|---|---|---|
+| Crude | NYMEX CL — USD/bbl, 1,000 bbl a lot | MCX CRUDEOIL — INR/bbl, 100 bbl a lot | CL × USDINR × 1 |
+| Gold | COMEX GC — USD/troy oz, 100 oz a lot | MCX GOLD — INR/10 g, 1 kg a lot | GC × USDINR × 0.32151 |
+| Silver | COMEX SI — USD/troy oz, 5,000 oz a lot | MCX SILVER — INR/kg, 30 kg a lot | SI × USDINR × 32.1507 |
+
+It is still a manual tool: no strategy, no signals, no automatic entries or
+exits.
+
+## What is different from Mirror-MT5-Trader
+
+Everything is the Mirror code, and everything above the brokers is
+untouched. The differences sit underneath it:
+
+| Module | What it adds |
+|---|---|
+| `mt5trader/arrow_broker.py` | `ArrowSession` — the only module that imports `pyarrow_client`. It gives the leg runner **exactly** the methods `BrokerSession` gives it for MT5, so the coordinator, executor, quoter and reconciler run unchanged on an Arrow leg |
+| `mt5trader/convert.py` | `ConvertedLeg` — restates a dollar leg in the rupee leg's currency **and** unit (`A' = A × FX × unit factor`): ticks, depth, fills, pendings, positions and contract size. Limit prices and modifies go back to the broker in its own dollars |
+| `mt5trader/fx.py` | The exchange rate. USDINR is typed by hand on the Exchanges page (stamped with the time, shown with its age), or read live from the mid of a symbol on either account |
+| `mt5trader/contracts.py` | The MCX and CME contract specs (quote unit, lot, tick), unit factors, the lot-for-lot comparison of the two legs, and the expiry watch |
+
+### The spread across two currencies
+
+```
+spread = Leg B − β × (Leg A × USDINR × unit factor)
+```
+
+Both legs are built from the **mid of the book**, exactly as before. Leg A's
+contract size is restated per converted unit (100 oz of COMEX gold is 311.03
+"10-gram" units), so `k = L_B × C_B` is still the one multiplier every
+spread-to-money conversion uses, and every figure on the ladder is in rupees.
+Each converted tick carries leg A's own dollar price beside it, and the ladder
+shows it on a strip under the quote: `A x USDINR 88.50 (2.1h old) x 0.3215 ·
+A raw 2650.4/2650.6 · expiry A 12.0d · B 22.0d`.
+
+**The rate is part of the price.** A rate that cannot be read makes leg A
+dark (unmeasured is not zero — never a rate of 1). A **typed** rate older than
+its `max_age_hours` (24h by default) still draws the spread, but withholds
+**orders** with the reason, the same as a stale leg, and the feed badge reads
+`FX stale`. It never withholds a **close**: a close goes to the broker in its
+own units and needs no rate.
+
+A fill is restated at the rate in force when it is reported, and the book
+keeps that price. Marking it later at a different rate shows the dollar leg's
+FX translation as part of the spread's P&L — which is real: the rupee leg has
+USDINR inside its price and the dollar leg does not. Hedge that with a USDINR
+future if you need to; this terminal shows it rather than hiding it.
+
+### Lots, contracts and expiries — monitored, not assumed
+
+* **Lot sizes differ, so the two legs are compared in the commodity itself.**
+  One CL (1,000 bbl) is exactly ten MCX CRUDEOIL (100 bbl): clip 1 : 10.
+  One GC (100 oz = 3.11 kg) against three 1 kg MCX GOLD is 3.5% short, and
+  that 3.5% is an **outright** position in gold, not part of the spread. The
+  Exchanges page and Diagnose print the match and the closest small clip.
+* **Contract sizes are read from each broker** (MT5's `trade_contract_size`,
+  Arrow's instrument master) and cross-checked against the exchange spec in
+  `contracts.py`. A disagreement is named by Diagnose — e.g. Arrow's master
+  giving MCX GOLD a lot of 1 (kg) when the price is per 10 g (contract 100).
+  Verify the table against the current MCX circular; exchanges revise lots.
+* **Expiries are watched on every ladder.** Both legs' expiries (MT5's
+  `expiration_time`, Arrow's master, or the date typed on the pair) are shown
+  with days to go, a warning inside `EXPIRY_WARN_DAYS` (5), and a warning when
+  the two expire `EXPIRY_GAP_DAYS` (3) or more apart — the leg that goes first
+  leaves the other unhedged. An expired leg is a red alert. MCX and CME
+  contracts of the "same" month expire on different days.
+
+### The Arrow leg
+
+* **Arrow is a netting account; the engine needs tickets.** Every order is
+  written to a ledger (`data/arrow-<account>.ledger.json`) **before** it is
+  sent; each opening fill becomes a ticket (its order id), and a close by
+  ticket is an opposite order for that ticket's volume — which on a netting
+  exchange *is* the close. A long and a short spread can stand side by side,
+  as on a hedging account.
+* **Positions are cross-checked against Arrow's own net.** Volume the
+  exchange does not hold is withheld from the report (so the reconciler sees
+  it as gone and counts its strikes); extra volume at Arrow that the ledger
+  cannot explain is not ours and is never touched. Both show on Diagnose as a
+  net-position mismatch. Do not trade the same MCX symbol by hand on this
+  account — it nets against this system's.
+* **An order lost mid-send** (process killed between the ledger write and
+  Arrow's answer) comes back as `unknown`, is named in the log, and is not
+  guessed either way.
+* **Market orders** are `MKT` with `mpp=True` and `price=0` — plain MKT is
+  disabled on Arrow (arrow-statarb fact 6). `quantity` is units (lots × lot
+  size); set `quantity_in_lots` on the account only if a one-lot test proves
+  Arrow wants lots for MCX.
+* **The broker's clock is IST** (UTC+05:30, fixed), so the session cutoff
+  and the journal run on the exchange's day.
+
+> **MCX on Arrow must be verified first.** arrow-statarb refused MCX because
+> the `pyarrow-client` build it used had no MCX exchange. `ArrowSession`
+> asks the installed SDK for one and **refuses to start, in words**, if it is
+> not there. The quote and order field names are read tolerantly, but they
+> have not been tested against a live MCX account: run the leg runner, press
+> **Diagnose**, and place a one-lot order on each symbol before trading size.
+> If a build answers prices in paise, set `price_divisor: 100` on the account.
+
+### Setting it up
+
+1. **Exchanges → accounts**: add the MT5 account (kind *MT5*) and the Arrow
+   account (kind *Arrow (MCX)*: app id, user id, password, API secret and the
+   TOTP **seed**; the secrets go to `.env`). Each gets its own runner port.
+2. **Exchanges → Exchange rates**: type today's USDINR and press *Set*.
+3. **Pairs → New pair**: leg A on the MT5 account (e.g. `GCG7`), leg B on the
+   Arrow account (e.g. `GOLD05FEB27FUT` — *Find* searches Arrow's MCX master).
+   Press **Read both legs** — it offers the FX and unit factor from the
+   contract specs, the lot match and both expiries — then Save.
+4. Press **Diagnose** on each account before the first trade of the day.
+
+`config.example.json` has the crude, gold and silver pairs set up.
+`pip install pyarrow-client` on the machine that runs the Arrow leg (it must
+be the static IP registered with Arrow).
+
+---
+
+The rest of this README is Mirror-MT5-Trader's, and all of it still applies.
 
 ## The specification
 

@@ -1862,6 +1862,8 @@
     var feed = node.querySelector('.feed');
     feed.textContent = market.feed_badge || DASH;
     feed.className = 'feed ' + badgeClass(market.feed_badge);
+    feed.title = market.fx_reason || market.guard_reason || '';
+    renderCross(node, row);
     node.querySelector('.pos').textContent = !isFlat(row.net_position)
       ? (row.net_position > 0 ? '+' : '') + qty(row.net_position) + ' @ ' +
         fmt(row.avg_entry, 4)
@@ -2288,6 +2290,59 @@
       width(market.short_spread, market.long_spread) +
       '<td class="age c-age"></td></tr>';
     return html + '</tbody></table>';
+  }
+
+  function renderCross(node, row) {
+    /* The cross-exchange strip: the rate leg A is restated at (and how
+     * old a typed rate is), leg A's own price in its own money, and both
+     * expiries with whatever is wrong with them. Drawn only for a pair
+     * that converts or has a contract on an exchange this knows. */
+    var cross = row.cross || {};
+    var conv = cross.conversion;
+    var watch = cross.expiry || {};
+    var strip = node.querySelector('.cross-strip');
+    if (!conv && !(watch.warnings || []).length) {
+      if (strip) { strip.remove(); }
+      return;
+    }
+    if (!strip) {
+      strip = document.createElement('div');
+      strip.className = 'cross-strip';
+      var counts = node.querySelector('.counts');
+      if (counts && counts.parentNode) {
+        counts.parentNode.insertBefore(strip, counts);
+      } else {
+        node.appendChild(strip);
+      }
+    }
+    var parts = [];
+    if (conv) {
+      var rate = conv.fx
+        ? conv.fx + ' ' + (conv.fx_rate === null || conv.fx_rate === undefined
+          ? DASH : fmt(conv.fx_rate, 4)) +
+          (conv.fx_age_sec === null || conv.fx_age_sec === undefined
+            ? (conv.fx_source === 'symbol' ? ' live' : '')
+            : ' (' + (conv.fx_age_sec / 3600).toFixed(1) + 'h old)')
+        : 'no FX';
+      parts.push('A x ' + rate + ' x ' + (conv.price_factor || 1));
+      if (conv.raw_bid_a !== null && conv.raw_bid_a !== undefined) {
+        parts.push('A raw ' + fmt(conv.raw_bid_a, 4) + '/' +
+                   fmt(conv.raw_ask_a, 4));
+      }
+    }
+    function days(d) {
+      return d === null || d === undefined ? DASH : fmt(d, 1) + 'd';
+    }
+    if (watch.days_a !== undefined || watch.days_b !== undefined) {
+      parts.push('expiry A ' + days(watch.days_a) + ' · B ' +
+                 days(watch.days_b));
+    }
+    (watch.warnings || []).forEach(function (w) { parts.push(w); });
+    if (conv && conv.fx_stale) { parts.push(conv.fx_stale); }
+    strip.textContent = parts.join('  ·  ');
+    strip.title = strip.textContent;
+    strip.className = 'cross-strip' + (watch.level === 'alert' ? ' alert'
+      : (watch.level === 'warn' || (conv && conv.fx_stale)) ? ' warn' : '');
   }
 
   function badgeClass(badge) {

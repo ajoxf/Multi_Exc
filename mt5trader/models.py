@@ -90,6 +90,21 @@ MAGIC_NUMBER = 24680
 _uid = itertools.count(1)
 
 
+def as_ticket(ticket):
+    """A broker ticket as the broker wants it back.
+
+    MT5 tickets are integers. Arrow order ids are the exchange's own
+    strings — usually digits, not always — and forcing one through
+    int() raised in the middle of a CLOSE, which must never fail on a
+    formatting question. Digits become an int; anything else is kept.
+    """
+    if isinstance(ticket, int):
+        return ticket
+    text = str(ticket).strip()
+    return int(text) if text.isdigit() and not text.startswith('0') \
+        else text
+
+
 def new_id(prefix):
     """Short, unique, and readable in a log line beside an MT5 ticket."""
     return f"{prefix}{next(_uid):04d}-{uuid.uuid4().hex[:4]}"

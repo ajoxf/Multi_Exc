@@ -27,7 +27,7 @@ import logging
 import time
 
 from . import costs, sizing
-from .models import (LegFill, OrderSide, OrderType, SpreadPosition,
+from .models import (as_ticket, LegFill, OrderSide, OrderType, SpreadPosition,
                      SpreadSide, new_id)
 from .spread import closing_prices, executable_spread
 
@@ -494,7 +494,7 @@ class PairExecutor:
                 want = min(want, remaining)
                 if want <= 0:
                     break
-            result = runner.close_ticket(symbol, int(ticket), want,
+            result = runner.close_ticket(symbol, as_ticket(ticket), want,
                                          entry_side.value, comment=comment)
             if result.get('ok'):
                 # WHAT FILLED, not what was asked. A market close can

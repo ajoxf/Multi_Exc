@@ -70,8 +70,10 @@
   function refresh() {
     return Promise.all([
       api('/api/accounts'), api('/api/pairs'), api('/api/settings'),
-      api('/api/lock')
+      api('/api/lock'), api('/api/fx')
     ]).then(function (results) {
+      // The exchange rates cross-currency pairs convert through.
+      local.fx = (results[4] && results[4].body && results[4].body.rates) || {};
       local.accounts = results[0].body.accounts || [];
       local.nextPort = results[0].body.next_free_port || local.nextPort;
       local.pairs = results[1].body.pairs || {};
@@ -169,8 +171,10 @@
   }
 
   //: The blank "new account" row's fields, in render order.
-  var NEW_ACCOUNT_FIELDS = ['f-name', 'f-terminal', 'f-login', 'f-server',
-                            'f-endpoint', 'f-password'];
+  var NEW_ACCOUNT_FIELDS = ['f-name', 'f-kind', 'f-terminal', 'f-login',
+                            'f-server', 'f-endpoint', 'f-password',
+                            'f-appid', 'f-userid', 'f-exchange',
+                            'f-apisecret', 'f-totp'];
 
   function newAccountDraft(section) {
     // What is half-typed into the NEW account row, or null.
@@ -194,7 +198,8 @@
     // alone is not the operator having started: carrying it would pin
     // the row to a port that may no longer be free.
     var started = NEW_ACCOUNT_FIELDS.some(function (field) {
-      return field !== 'f-endpoint' && draft[field];
+      return field !== 'f-endpoint' && field !== 'f-kind' &&
+        field !== 'f-exchange' && draft[field];
     });
     return started ? draft : null;
   }
@@ -207,6 +212,16 @@
       var input = row.querySelector('.' + field);
       if (input) { input.value = draft[field]; }
     });
+    kindClass(row);
+  }
+
+  function kindClass(row) {
+    /* An MT5 row and an Arrow row ask for different things. Both sets of
+     * fields are drawn and the kind picks which are SHOWN, so switching
+     * kind never throws away what was typed. */
+    var kind = (row.querySelector('.f-kind') || {}).value || 'mt5';
+    row.classList.toggle('kind-arrow', kind === 'arrow');
+    row.classList.toggle('kind-mt5', kind !== 'arrow');
   }
 
   function stampRendered(section) {
@@ -437,9 +452,13 @@
     var html = '<h3>Exchanges <small>one login, one terminal, one port — ' +
       'the three things that cannot be shared</small></h3>';
     html += connectionHtml();
+    html += fxHtml();
     html += '<table class="grid-form"><thead><tr><th>Name</th>' +
-      '<th>Terminal (terminal64.exe)</th><th>Login</th><th>Server</th>' +
-      '<th>Runner endpoint</th><th>Password</th><th></th></tr></thead><tbody>';
+      '<th>Kind</th>' +
+      '<th>Terminal (terminal64.exe) / Arrow app id</th>' +
+      '<th>Login / Arrow user id</th><th>Server / exchange</th>' +
+      '<th>Runner endpoint</th><th>Secrets (to .env)</th><th></th>' +
+      '</tr></thead><tbody>';
     local.accounts.forEach(function (account) {
       html += accountRow(account);
     });
@@ -452,24 +471,43 @@
     var clashes = [account.endpoint_clash, account.login_clash,
                    account.terminal_clash].filter(Boolean);
     var test = local.tests[account.name];
-    var html = '<tr data-account="' + escape(account.name) + '"' +
-      (account.isNew ? ' class="new"' : '') + '>';
+    var kind = account.kind === 'arrow' ? 'arrow' : 'mt5';
+    var html = '<tr data-account="' + escape(account.name) + '" class="' +
+      (account.isNew ? 'new ' : '') + 'kind-' + kind + '">';
     html += '<td>' + (account.isNew
       ? '<input class="f-name" placeholder="e.g. CFI Spot">'
       : escape(account.name)) + '</td>';
-    html += '<td><input class="f-terminal" value="' +
+    html += '<td><select class="f-kind">' +
+      '<option value="mt5"' + (kind === 'mt5' ? ' selected' : '') +
+      '>MT5</option><option value="arrow"' +
+      (kind === 'arrow' ? ' selected' : '') + '>Arrow (MCX)</option>' +
+      '</select></td>';
+    html += '<td><input class="f-terminal mt5-only" value="' +
       escape(account.terminal_path) + '" placeholder="blank = attach to ' +
-      'whichever terminal is open"></td>';
-    html += '<td><input class="f-login" value="' + escape(account.login) +
-      '"></td>';
-    html += '<td><input class="f-server" value="' + escape(account.server) +
-      '"></td>';
+      'whichever terminal is open">' +
+      '<input class="f-appid arrow-only" value="' + escape(account.app_id) +
+      '" placeholder="Arrow app id"></td>';
+    html += '<td><input class="f-login mt5-only" value="' +
+      escape(account.login) + '">' +
+      '<input class="f-userid arrow-only" value="' +
+      escape(account.user_id) + '" placeholder="Arrow user id"></td>';
+    html += '<td><input class="f-server mt5-only" value="' +
+      escape(account.server) + '">' +
+      '<input class="f-exchange arrow-only" value="' +
+      escape(account.exchange || 'MCX') + '"></td>';
     html += '<td><input class="f-endpoint" value="' +
       escape(account.endpoint) + '" placeholder="127.0.0.1:9101"></td>';
     html += '<td><input class="f-password" type="password" placeholder="' +
-      (account.password_set ? 'set — type to replace' : 'not set') +
-      '"><div class="hint">' + (account.isNew
-        ? 'goes to .env under a key derived from the name'
+      'password: ' + (account.password_set ? 'set — type to replace'
+                                           : 'not set') + '">' +
+      '<input class="f-apisecret arrow-only" type="password" ' +
+      'placeholder="API secret: ' + (account.api_secret_set
+        ? 'set — type to replace' : 'not set') + '">' +
+      '<input class="f-totp arrow-only" type="password" ' +
+      'placeholder="TOTP seed (base32): ' + (account.totp_secret_set
+        ? 'set — type to replace' : 'not set') + '">' +
+      '<div class="hint">' + (account.isNew
+        ? 'goes to .env under keys derived from the name'
         : '→ ' + escape(account.password_env) + ' in .env') +
       '</div></td>';
     html += '<td class="actions">' +
@@ -488,14 +526,67 @@
       '</td></tr>';
 
     if (clashes.length) {
-      html += '<tr class="problem"><td colspan="7">' +
+      html += '<tr class="problem"><td colspan="8">' +
         clashes.map(escape).join('<br>') + '</td></tr>';
     }
     if (test) {
-      html += '<tr class="checklist"><td colspan="7">' +
+      html += '<tr class="checklist"><td colspan="8">' +
         checklistHtml(test) + '</td></tr>';
     }
     return html;
+  }
+
+  function fxHtml() {
+    /* The exchange rates cross-currency pairs convert through — USDINR
+     * for a dollar leg against a rupee leg. Typed here, stamped with the
+     * time it was typed, and shown with its age: a rate older than its
+     * limit still draws the spread, but withholds orders until updated.
+     */
+    var names = Object.keys(local.fx || {}).sort();
+    if (!names.length) { names = ['USDINR']; }
+    var html = '<h3>Exchange rates <small>leg A x rate x unit factor = ' +
+      'leg A in leg B\'s money — a stale rate withholds orders, never a ' +
+      'close</small></h3><table class="grid-form fx-rates"><thead><tr>' +
+      '<th>Pair</th><th>Rate</th><th>Source</th><th>Age</th>' +
+      '<th>State</th><th></th></tr></thead><tbody>';
+    names.forEach(function (name) {
+      var row = (local.fx || {})[name] || {};
+      var age = row.age_sec === null || row.age_sec === undefined
+        ? DASH : (row.age_sec / 3600).toFixed(1) + 'h';
+      html += '<tr data-fx="' + escape(name) + '"><td>' + escape(name) +
+        '</td><td><input class="fx-rate" type="number" step="0.0001" ' +
+        'value="' + escape(row.source === 'symbol' ? '' :
+                           (row.rate === null || row.rate === undefined
+                             ? '' : row.rate)) + '" placeholder="' +
+        (row.source === 'symbol' ? 'live: ' + UI.fmt(row.rate, 4)
+                                 : 'e.g. 84.25') + '"></td>' +
+        '<td>' + escape(row.source === 'symbol'
+          ? 'live ' + (row.symbol || '') + ' on ' + (row.account || '')
+          : (row.source === 'missing' ? 'not set' : 'manual')) + '</td>' +
+        '<td>' + age + '</td>' +
+        '<td' + (row.stale ? ' class="problem-text"' : '') + '>' +
+        escape(row.stale || 'OK') + '</td>' +
+        '<td class="actions"><button class="btn save-fx">Set</button>' +
+        '</td></tr>';
+    });
+    return html + '</tbody></table>';
+  }
+
+  function saveFx(row) {
+    var name = row.dataset.fx;
+    var rate = parseFloat(row.querySelector('.fx-rate').value);
+    if (!(rate > 0)) {
+      UI.toast(name + ' must be a positive number');
+      return;
+    }
+    return api('/api/fx/' + encodeURIComponent(name),
+               {method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({rate: rate})}).then(function (result) {
+      if (!result.ok) { UI.toast(result.body.error); return; }
+      UI.toast(name + ' set to ' + rate + ' — the ladders reprice on the ' +
+               'next poll', 'ok');
+      refresh();
+    });
   }
 
   function checklistHtml(result) {
@@ -656,6 +747,10 @@
     });
     var detail = escape(leg.account || '?');
     if (account && account.login) { detail += ' · #' + escape(account.login); }
+    if (account && account.kind === 'arrow') {
+      detail += ' · Arrow ' + escape(account.user_id || '') + ' ' +
+        escape(account.exchange || 'MCX');
+    }
     if (account && account.server) {
       detail += ' · ' + escape(account.server);
     }
@@ -665,7 +760,10 @@
       // first click.
       detail += ' — no such account';
     }
-    return escape(leg.symbol) + '<div class="hint">on ' + detail + '</div>';
+    return escape(leg.symbol) + (leg.fx || leg.price_factor
+      ? ' <small>x ' + escape(leg.fx || '1') + ' x ' +
+        escape(leg.price_factor || 1) + '</small>' : '') +
+      '<div class="hint">on ' + detail + '</div>';
   }
 
   function pairForm() {
@@ -693,6 +791,31 @@
                   symbolInput('a', draft.leg_a_symbol));
     html += field('Leg B', accountSelect('p-account-b', draft.leg_b_account) +
                   symbolInput('b', draft.leg_b_symbol));
+    var suggestion = derived && derived.conversion_suggestion;
+    html += field('Leg A FX',
+                  '<input class="p-fx-a" value="' +
+                  escape(draft.leg_a_fx || '') + '" placeholder="blank = ' +
+                  'same currency, e.g. USDINR">' +
+                  '<div class="hint">Leg A is restated in leg B\'s money ' +
+                  'before the two are subtracted: A x rate x unit factor. ' +
+                  'Set the rate under Exchange rates above.</div>');
+    html += field('Leg A unit factor',
+                  '<input class="p-factor-a" type="number" step="any" ' +
+                  'value="' + escape(draft.leg_a_factor === null ||
+                                     draft.leg_a_factor === undefined
+                                     ? '' : draft.leg_a_factor) +
+                  '" placeholder="blank = 1">' +
+                  (suggestion && suggestion.price_factor
+                    ? '<div class="hint">' + escape(suggestion.why) +
+                      ' <button class="btn tiny use-conversion" ' +
+                      'data-fx="' + escape(suggestion.fx || '') +
+                      '" data-factor="' + suggestion.price_factor +
+                      '">use ' + escape(suggestion.fx || 'no FX') + ' x ' +
+                      suggestion.price_factor + '</button></div>'
+                    : '<div class="hint">' + (suggestion
+                        ? escape(suggestion.why)
+                        : 'USD/oz → INR/10g is 0.3215, USD/oz → INR/kg ' +
+                          'is 32.15, USD/bbl → INR/bbl is 1') + '</div>'));
     html += field('Pair type',
                   '<select class="p-type">' +
                   option('SPOT_FUTURE', draft.pair_type) +
@@ -764,10 +887,29 @@
         (derived.min_notional_usd
           ? UI.money(derived.min_notional_usd) + ' a leg' : DASH) +
         '</b> — state it before anyone tries to trade under it</div>';
-      html += '<div>Contract sizes read from MT5: A ' +
+      html += '<div>Contract sizes read from the brokers: A ' +
         escape((derived.specs.a || {}).contract_size) + ' · B ' +
         escape((derived.specs.b || {}).contract_size) +
-        ' (never typed in)</div>';
+        ' (never typed in' + ((derived.specs.a || {}).contract_size_raw
+          ? '; A is ' + escape(derived.specs.a.contract_size_raw) +
+            ' per lot in its own unit' : '') + ')</div>';
+      if (derived.lot_match) {
+        var m = derived.lot_match;
+        html += '<div>One Qty in the commodity: A ' +
+          UI.fmt(m.qty_a, 2) + ' ' + escape(m.base_unit) + ' · B ' +
+          UI.fmt(m.qty_b, 2) + ' (' + UI.fmt(m.mismatch_pct, 2) +
+          '%) — closest small clip ' + escape(m.best_clip_a) + ' : ' +
+          escape(m.best_clip_b) + ' (' + UI.fmt(m.best_mismatch_pct, 2) +
+          '% off)</div>';
+      }
+      if (derived.expiry_watch) {
+        var w = derived.expiry_watch;
+        html += '<div>Expiry: A ' + (w.days_a === null ? DASH
+          : UI.fmt(w.days_a, 1) + ' days') + ' · B ' +
+          (w.days_b === null ? DASH : UI.fmt(w.days_b, 1) + ' days') +
+          (w.warnings.length ? ' — <b class="problem-text">' +
+            escape(w.warnings.join('; ')) + '</b>' : '') + '</div>';
+      }
       html += '</div>';
     }
     html += '<div class="actions">' +
@@ -829,6 +971,9 @@
 
   function onChange(e) {
     if (e.target.closest('.pair-form')) { readDraft(); }
+    if (e.target.classList.contains('f-kind')) {
+      kindClass(e.target.closest('tr'));
+    }
   }
 
   function savePin(panel) {
@@ -881,6 +1026,15 @@
     if (button.classList.contains('save-account')) {
       return saveAccount(row);
     }
+    if (button.classList.contains('save-fx')) {
+      return saveFx(row);
+    }
+    if (button.classList.contains('use-conversion')) {
+      readDraft();
+      local.draft.leg_a_fx = button.dataset.fx || '';
+      local.draft.leg_a_factor = parseFloat(button.dataset.factor);
+      return render(false);
+    }
     if (button.classList.contains('connect-account')) {
       return runCheck(row.dataset.account, 'connect', button);
     }
@@ -922,6 +1076,8 @@
         leg_a_symbol: (pair.leg_a || {}).symbol,
         leg_b_account: (pair.leg_b || {}).account,
         leg_b_symbol: (pair.leg_b || {}).symbol,
+        leg_a_fx: (pair.leg_a || {}).fx || '',
+        leg_a_factor: (pair.leg_a || {}).price_factor,
         expiry: pair.expiry || '',
       };
       local.derived = null;
@@ -1048,13 +1204,26 @@
       UI.toast('an account needs a name before it can be saved');
       return;
     }
+    function read(cls) {
+      var input = row.querySelector('.' + cls);
+      return input ? input.value : '';
+    }
+    var kind = read('f-kind') || 'mt5';
     var body = {
-      terminal_path: row.querySelector('.f-terminal').value,
-      login: row.querySelector('.f-login').value,
-      server: row.querySelector('.f-server').value,
-      endpoint: row.querySelector('.f-endpoint').value,
-      password: row.querySelector('.f-password').value
+      kind: kind,
+      terminal_path: kind === 'mt5' ? read('f-terminal') : '',
+      login: kind === 'mt5' ? read('f-login') : '',
+      server: kind === 'mt5' ? read('f-server') : '',
+      endpoint: read('f-endpoint'),
+      password: read('f-password')
     };
+    if (kind === 'arrow') {
+      body.app_id = read('f-appid');
+      body.user_id = read('f-userid');
+      body.exchange = read('f-exchange') || 'MCX';
+      body.api_secret = read('f-apisecret');
+      body.totp_secret = read('f-totp');
+    }
     return api('/api/accounts/' + encodeURIComponent(name),
                {method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(body)}).then(function (result) {
@@ -1105,6 +1274,9 @@
       leg_a_symbol: value('.p-symbol-a'),
       leg_b_account: value('.p-account-b'),
       leg_b_symbol: value('.p-symbol-b'),
+      leg_a_fx: value('.p-fx-a').toUpperCase(),
+      leg_a_factor: value('.p-factor-a') === ''
+        ? null : parseFloat(value('.p-factor-a')),
       expiry: value('.p-expiry') || null
     };
   }
@@ -1132,7 +1304,15 @@
     var draft = local.draft;
     return {
       name: draft.name || draft.key,
-      leg_a: {account: draft.leg_a_account, symbol: draft.leg_a_symbol},
+      // FX and unit factor ride on leg A. Blank is sent as '' so the
+      // server CLEARS them rather than keeping a conversion the form no
+      // longer shows.
+      leg_a: {account: draft.leg_a_account, symbol: draft.leg_a_symbol,
+              fx: draft.leg_a_fx || '',
+              price_factor: (draft.leg_a_factor === null ||
+                             draft.leg_a_factor === undefined ||
+                             isNaN(draft.leg_a_factor))
+                ? '' : draft.leg_a_factor},
       leg_b: {account: draft.leg_b_account, symbol: draft.leg_b_symbol},
       pair_type: draft.pair_type,
       hedge_ratio: draft.hedge_ratio,

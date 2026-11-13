@@ -21,7 +21,7 @@ is testable without MT5.
 
 import time
 
-from . import hedgeratio, sizing
+from . import contracts, hedgeratio, sizing
 
 PASS, WARN, FAIL, INFO = 'PASS', 'WARN', 'FAIL', 'INFO'
 _RANK = {PASS: 0, INFO: 0, WARN: 1, FAIL: 2}
@@ -72,6 +72,10 @@ def check_account(checklist, name, terminal, account=None, offset=None,
                        'Check the endpoint on this row matches the port it '
                        'listens on'])
         return checklist
+
+    if terminal.get('broker') == 'arrow':
+        return _check_arrow_account(checklist, scope, name, terminal,
+                                    account, offset, expect_login)
 
     if not terminal.get('library'):
         checklist.add(scope, 'MetaTrader5 package', FAIL,
@@ -361,6 +365,171 @@ def check_symbol(checklist, scope, report, role=None):
     return checklist
 
 
+def _check_arrow_account(checklist, scope, name, terminal, account, offset,
+                         expect_login):
+    """The Arrow leg: package, login, MCX, and the netting ledger."""
+    if not terminal.get('library'):
+        checklist.add(scope, 'pyarrow-client package', FAIL,
+                      'the Arrow SDK is not installed on that machine',
+                      ['pip install pyarrow-client'])
+        return checklist
+    checklist.add(scope, 'pyarrow-client package', PASS, 'installed')
+    if not terminal.get('terminal'):
+        checklist.add(scope, 'Arrow login', FAIL,
+                      terminal.get('error') or 'not logged in to Arrow',
+                      ['Check the app id and user id on this row, and the '
+                       'password, API secret and TOTP SEED (base32, not the '
+                       'six-digit code) in .env',
+                       'Arrow only accepts API logins from the static IP '
+                       'registered with it (SEBI rule) — run this on that '
+                       'machine',
+                       'The session token lasts about a day: restart the '
+                       'leg runner each morning'])
+        return checklist
+    live = terminal.get('login')
+    if expect_login and live and str(live) != str(expect_login):
+        checklist.add(scope, 'Account login', FAIL,
+                      f'logged into Arrow as {live}, but this account is '
+                      f'configured as {expect_login}',
+                      ['Correct the user id on the Exchanges page'])
+        return checklist
+    checklist.add(scope, 'Account login', PASS,
+                  f"{live} on {terminal.get('server')}"
+                  f" ({terminal.get('instruments', 0):,} instruments)")
+    if not terminal.get('instruments'):
+        checklist.add(scope, 'Instrument master', FAIL,
+                      f"no {terminal.get('exchange')} instruments loaded — "
+                      f"lot sizes and expiries are unknown",
+                      ['Restart the leg runner; the master downloads at '
+                       'login'])
+    checklist.add(scope, 'Margin mode', PASS,
+                  'NETTING at the exchange, with a ticket ledger above it: '
+                  'every order this system sends gets its own ticket and a '
+                  'close is an opposite order for that ticket\'s volume')
+    mismatches = terminal.get('netting_mismatches') or {}
+    for symbol, row in mismatches.items():
+        checklist.add(scope, f'Net position {symbol}', WARN,
+                      f"this system's ledger holds "
+                      f"{row.get('ours_net_lots'):+g} lots net, Arrow holds "
+                      f"{row.get('exchange_net_lots'):+g}. "
+                      + (row.get('note') or
+                         'Volume the exchange does not hold is reported to '
+                         'the reconciler as gone; extra volume is left '
+                         'alone as not ours'),
+                      ['Compare Arrow\'s positions with the ladder before '
+                       'trading this symbol',
+                       'A trade placed by hand on the same symbol nets '
+                       'against this system\'s'])
+    if account:
+        equity = account.get('equity')
+        checklist.add(scope, 'Account', INFO,
+                      f"equity {equity:,.2f} INR" if equity is not None
+                      else 'Arrow returned no funds figures')
+    checklist.add(scope, 'Broker clock', PASS,
+                  'IST (UTC+05:30) — the exchange\'s clock, which is fixed')
+    return checklist
+
+
+def check_cross(checklist, pair, report_a, report_b, now=None):
+    """A cross-exchange pair: is leg A restated into leg B's money and
+    unit, do the two lots cover each other, and when does each expire?"""
+    scope = f'Pair {pair.key}'
+    conv = report_a.get('conversion')
+    fx_name = pair.leg_a.get('fx')
+    factor = pair.leg_a.get('price_factor')
+    suggestion = contracts.suggest_conversion(pair.symbol_a, pair.symbol_b)
+    if conv:
+        rate = conv.get('fx_rate')
+        reason = conv.get('fx_reason')
+        line = (f"{pair.symbol_a} x {fx_name or '1'}"
+                + (f' ({rate:g})' if rate else '')
+                + f" x {float(factor or 1):g} -> "
+                f"{report_a.get('currency')} per {pair.symbol_b}'s unit")
+        if fx_name and rate is None:
+            checklist.add(scope, 'Conversion', FAIL,
+                          f'{line}: the {fx_name} rate is unknown — '
+                          f'{reason}', ['Set the rate on the Exchanges page'])
+        elif reason:
+            checklist.add(scope, 'Conversion', WARN, f'{line}: {reason}',
+                          ['Update the rate on the Exchanges page'])
+        else:
+            checklist.add(scope, 'Conversion', PASS, line)
+    if suggestion.get('price_factor') is not None and (
+            (suggestion.get('fx') or None) != (fx_name or None)
+            or abs(float(factor or 1.0) - suggestion['price_factor'])
+            > 1e-6 * suggestion['price_factor']):
+        checklist.add(scope, 'Unit factor', WARN,
+                      f"configured as {fx_name or 'no FX'} x "
+                      f"{float(factor or 1):g}; the contract specs say "
+                      f"{suggestion.get('fx') or 'no FX'} x "
+                      f"{suggestion['price_factor']:g} ({suggestion['why']})",
+                      ['Set leg A\'s FX and unit factor to the suggestion '
+                       'unless the broker quotes this symbol differently'])
+
+    spec_a = contracts.spec_for(pair.symbol_a)
+    spec_b = contracts.spec_for(pair.symbol_b, 'MCX')
+    raw_a = report_a.get('contract_size_raw', report_a.get('contract_size'))
+    for spec, theirs, role, symbol in ((spec_a, raw_a, 'A', pair.symbol_a),
+                                       (spec_b, report_b.get('contract_size'),
+                                        'B', pair.symbol_b)):
+        if spec is None or not theirs or not spec.contract_size:
+            continue
+        if abs(float(theirs) - spec.contract_size) > 1e-6 * spec.contract_size:
+            checklist.add(scope, f'Leg {role} lot', WARN,
+                          f'{symbol}: the broker says {float(theirs):g} per '
+                          f'lot, the {spec.description} spec is '
+                          f'{spec.lot_quantity:g} {spec.lot_unit} priced per '
+                          f'{spec.quote_unit} = {spec.contract_size:g}. A CFD '
+                          f'or a broker\'s own lot can differ — every money '
+                          f'figure uses the broker\'s',
+                          ['Check the symbol\'s contract specification in '
+                           'the terminal', 'Set the Contract override on '
+                           'the ladder if the broker is wrong'])
+    if report_b.get('contract_size_note'):
+        checklist.add(scope, 'Leg B lot', WARN,
+                      report_b['contract_size_note'],
+                      ['Check MCX\'s contract circular and place a one-lot '
+                       'test order before trading size'])
+    match = contracts.lot_match(spec_a, spec_b, pair.clip_lots_a,
+                                pair.clip_lots_b)
+    if match:
+        text = (f"one Qty = {match['qty_a']:,.4g} {match['base_unit']} on A "
+                f"against {match['qty_b']:,.4g} on B "
+                f"({match['mismatch_pct']:+.2f}%)")
+        if abs(match['mismatch_pct']) <= 1.0:
+            checklist.add(scope, 'Lot match', PASS, text)
+        else:
+            checklist.add(scope, 'Lot match', WARN,
+                          text + ' — the difference is an OUTRIGHT position '
+                          'in the commodity, not part of the spread',
+                          [f"{match['best_clip_a']} : {match['best_clip_b']} "
+                           f"lots is the closest small clip "
+                           f"({match['best_mismatch_pct']:.2f}% off)"])
+
+    watch = contracts.expiry_watch(
+        pair.expiry_a or report_a.get('expiry'),
+        pair.expiry or report_b.get('expiry'), now=now)
+    text = (f"A {contracts.fmt_expiry(watch['expiry_a'])}"
+            f" / B {contracts.fmt_expiry(watch['expiry_b'])}")
+    if watch['level'] == 'alert':
+        checklist.add(scope, 'Expiry', FAIL,
+                      text + ' — ' + '; '.join(watch['warnings']),
+                      ['Roll to the next contract month'])
+    elif watch['warnings']:
+        checklist.add(scope, 'Expiry', WARN,
+                      text + ' — ' + '; '.join(watch['warnings']),
+                      ['Plan the roll before the first leg expires'])
+    elif watch['unknown']:
+        checklist.add(scope, 'Expiry', WARN,
+                      text + f" — {' and '.join(watch['unknown'])} expiry "
+                      f"unknown; a spot or CFD leg has none",
+                      ['Type the expiry on the pair if the broker does not '
+                       'report one'])
+    else:
+        checklist.add(scope, 'Expiry', PASS, text)
+    return checklist
+
+
 def check_pair(checklist, pair, report_a, report_b,
                account_currency=None):
     """Do the two legs fit each other?
@@ -411,6 +580,11 @@ def check_pair(checklist, pair, report_a, report_b,
                           f'beta the "spread" is really one leg\'s own price',
                           ['Re-derive the hedge ratio for this pair'])
 
+    leg_a = getattr(pair, 'leg_a', None) or {}
+    if leg_a.get('fx') or leg_a.get('price_factor') or \
+            report_b.get('broker') == 'arrow':
+        check_cross(checklist, pair, report_a, report_b)
+
     # The spread is `P_B - beta x P_A`. Subtracting one price from
     # another only means anything if the two are quoted in the SAME
     # money — and the P&L multiplier `k = L_B x C_B` is leg B's units,
@@ -428,9 +602,9 @@ def check_pair(checklist, pair, report_a, report_b,
                       f'neither currency — and every figure derived from '
                       f'it (P&L, break-even, the take-profit) is out by '
                       f'the exchange rate',
-                      ['Pair two instruments quoted in the same currency',
-                       'This system does not convert between them, and it '
-                       'will not pretend to'])
+                      ['Give leg A an FX rate (e.g. USDINR) and a unit '
+                       'factor on the pair, so it is restated in leg B\'s '
+                       'currency before the two are subtracted'])
     elif currency_a and currency_b:
         account = (account_currency or '').upper()
         if account and account != currency_a:

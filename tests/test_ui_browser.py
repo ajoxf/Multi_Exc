@@ -323,7 +323,8 @@ def chromium_path():
     None lets Playwright find its own.
     """
     root = Path(os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '/opt/pw-browsers'))
-    for candidate in sorted(root.glob('chromium-*/chrome-linux/chrome')):
+    for candidate in sorted(list(root.glob('chromium-*/chrome-linux/chrome'))
+                            + list(root.glob('chromium-*/chrome-linux64/chrome'))):
         return str(candidate)
     return None
 
